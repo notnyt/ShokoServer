@@ -7,10 +7,13 @@ using Shoko.Models.Server;
 using NLog;
 using Shoko.Commons.Extensions;
 using Shoko.Models.Enums;
-using Shoko.Server.Commands;
+using Shoko.Server.CommandQueue.Commands.Image;
+using Shoko.Server.CommandQueue.Commands.MovieDB;
+using Shoko.Server.CommandQueue.Commands.WebCache;
 using Shoko.Server.Models;
 using Shoko.Server.Extensions;
 using Shoko.Server.Repositories;
+using Shoko.Server.Settings;
 using TMDbLib.Client;
 using TMDbLib.Objects.General;
 using TMDbLib.Objects.Movies;
@@ -84,9 +87,8 @@ namespace Shoko.Server.Providers.MovieDB
                         // download the image
                         if (!string.IsNullOrEmpty(poster.GetFullImagePath()) && !File.Exists(poster.GetFullImagePath()))
                         {
-                            CommandRequest_DownloadImage cmd = new CommandRequest_DownloadImage(poster.MovieDB_PosterID,
-                                ImageEntityType.MovieDB_Poster, false);
-                            cmd.Save();
+                            CommandQueue.Queue.Instance.Add(new CmdImageDownload(poster.MovieDB_PosterID,
+                                ImageEntityType.MovieDB_Poster, false));
                             numPostersDownloaded++;
                         }
                     }
@@ -97,7 +99,7 @@ namespace Shoko.Server.Providers.MovieDB
                         // first we check if file was downloaded
                         if (!File.Exists(poster.GetFullImagePath()))
                         {
-                            Repo.Instance.MovieDB_Poster.Delete(poster.MovieDB_PosterID);
+                            Repo.Instance.MovieDB_Poster.Delete(poster);
                         }
                     }
                 }
@@ -113,9 +115,8 @@ namespace Shoko.Server.Providers.MovieDB
                         // download the image
                         if (!string.IsNullOrEmpty(fanart.GetFullImagePath()) && !File.Exists(fanart.GetFullImagePath()))
                         {
-                            CommandRequest_DownloadImage cmd = new CommandRequest_DownloadImage(fanart.MovieDB_FanartID,
-                                ImageEntityType.MovieDB_FanArt, false);
-                            cmd.Save();
+                            CommandQueue.Queue.Instance.Add(new CmdImageDownload(fanart.MovieDB_FanartID,
+                                ImageEntityType.MovieDB_FanArt, false));
                             numFanartDownloaded++;
                         }
                     }
@@ -126,7 +127,7 @@ namespace Shoko.Server.Providers.MovieDB
                         // first we check if file was downloaded
                         if (!File.Exists(fanart.GetFullImagePath()))
                         {
-                            Repo.Instance.MovieDB_Fanart.Delete(fanart.MovieDB_FanartID);
+                            Repo.Instance.MovieDB_Fanart.Delete(fanart);
                         }
                     }
                 }
@@ -228,38 +229,31 @@ namespace Shoko.Server.Providers.MovieDB
 
             // download and update series info and images
             UpdateMovieInfo(movieDBID, true);
-            CrossRef_AniDB_Other xref;
-            using (var upd = Repo.Instance.CrossRef_AniDB_Other.BeginAddOrUpdate(() => Repo.Instance.CrossRef_AniDB_Other.GetByAnimeIDAndType(animeID, CrossRefType.MovieDB)))
+            ;
+            using (var upd = Repo.Instance.CrossRef_AniDB_Provider.BeginAddOrUpdate(() => Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeID, CrossRefType.MovieDB).FirstOrDefault()))
             {
                 upd.Entity.AnimeID= animeID;
                 if (fromWebCache)
-                    upd.Entity.CrossRefSource = (int)CrossRefSource.WebCache;
+                    upd.Entity.CrossRefSource = CrossRefSource.WebCache;
                 else
-                    upd.Entity.CrossRefSource = (int)CrossRefSource.User;
+                    upd.Entity.CrossRefSource = CrossRefSource.User;
 
-                upd.Entity.CrossRefType = (int)CrossRefType.MovieDB;
+                upd.Entity.CrossRefType = CrossRefType.MovieDB;
                 upd.Entity.CrossRefID = movieDBID.ToString();
-                xref = upd.Commit();
+                SVR_CrossRef_AniDB_Provider xref = upd.Commit();
+                CommandQueue.Queue.Instance.Add(new CmdWebCacheSendAniDBXRef(xref.CrossRef_AniDB_ProviderID));
             }          
             SVR_AniDB_Anime.UpdateStatsByAnimeID(animeID);
 
             logger.Trace("Changed moviedb association: {0}", animeID);
 
-            CommandRequest_WebCacheSendXRefAniDBOther req =
-                new CommandRequest_WebCacheSendXRefAniDBOther(xref.CrossRef_AniDB_OtherID);
-            req.Save();
+            
         }
 
         public static void RemoveLinkAniDBMovieDB(int animeID)
         {
-            CrossRef_AniDB_Other xref = Repo.Instance.CrossRef_AniDB_Other.GetByAnimeIDAndType(animeID, CrossRefType.MovieDB);
-            if (xref == null) return;
-
-            Repo.Instance.CrossRef_AniDB_Other.Delete(xref.CrossRef_AniDB_OtherID);
-
-            CommandRequest_WebCacheDeleteXRefAniDBOther req = new CommandRequest_WebCacheDeleteXRefAniDBOther(animeID,
-                CrossRefType.MovieDB);
-            req.Save();
+            Repo.Instance.CrossRef_AniDB_Provider.FindAndDelete(() => Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeID, CrossRefType.MovieDB));
+            CommandQueue.Queue.Instance.Add(new CmdWebCacheDeleteAniDBXRef(animeID,CrossRefType.MovieDB));
         }
 
         public static void ScanForMatches()
@@ -285,8 +279,7 @@ namespace Shoko.Server.Providers.MovieDB
 
                 logger.Trace("Found anime movie without MovieDB association: " + anime.MainTitle);
 
-                CommandRequest_MovieDBSearchAnime cmd = new CommandRequest_MovieDBSearchAnime(ser.AniDB_ID, false);
-                cmd.Save();
+                CommandQueue.Queue.Instance.Add(new CmdMovieDBSearchAnime(ser.AniDB_ID, false));
             }
         }
     }

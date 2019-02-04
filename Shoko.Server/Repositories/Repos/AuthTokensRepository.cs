@@ -1,9 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using NutzCode.InMemoryIndex;
 using Shoko.Models.Server;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories.Repos
 {
@@ -40,7 +40,7 @@ namespace Shoko.Server.Repositories.Repos
             AuthTokens auth = tokens.FirstOrDefault();
             if (tokens.Count <= 1) return auth;
             tokens.Remove(auth);
-            Delete(tokens);
+            this.Delete(tokens);
             return auth;
         }
 
@@ -53,7 +53,7 @@ namespace Shoko.Server.Repositories.Repos
                     ? UserIDs.GetMultiple(userID).ToList()
                     : Table.Where(a => a.UserID==userID).ToList();
             }
-            Delete(tokens);
+            this.Delete(tokens);
         }
 
         public void DeleteWithToken(string token)
@@ -66,7 +66,8 @@ namespace Shoko.Server.Repositories.Repos
                     ? Tokens.GetMultiple(token.ToLowerInvariant().Trim()).ToList()
                     : Table.Where(a => a.Token == token.ToLowerInvariant().Trim()).ToList();
             }
-            Delete(tokens);
+            this.Delete(tokens);
+
         }
 
         public List<AuthTokens> GetByUserID(int userID)
@@ -99,7 +100,7 @@ namespace Shoko.Server.Repositories.Repos
             if (tokens.Count > 1)
             {
                 if (auth != null) tokens.Remove(auth);
-                Delete(tokens);
+                this.Delete(tokens);
             }
             string apiKey = auth?.Token.ToLowerInvariant().Trim() ?? string.Empty;
 

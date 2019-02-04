@@ -5,14 +5,14 @@ using System.Globalization;
 using System.Linq;
 using Newtonsoft.Json;
 using NLog;
-using NutzCode.InMemoryIndex;
 using Shoko.Commons.Extensions;
 using Shoko.Models.Client;
 using Shoko.Models.Enums;
 using Shoko.Models.Server;
-using Shoko.Server.Commands;
+using Shoko.Server.CommandQueue.Commands.Server;
 using Shoko.Server.Extensions;
 using Shoko.Server.Repositories;
+using Shoko.Server.Utilities;
 
 namespace Shoko.Server.Models
 {
@@ -147,7 +147,7 @@ namespace Shoko.Server.Models
         {
             if (Conditions.FirstOrDefault(a => a.GroupFilterID == 0) != null)
             {
-                using (var upd = Repo.Instance.GroupFilter.BeginAddOrUpdate(() => this))
+                using (var upd = Repo.Instance.GroupFilter.BeginAddOrUpdate(this))
                 {
                     Conditions.ForEach(a => a.GroupFilterID = GroupFilterID);
                     upd.Entity.Conditions = Conditions;
@@ -986,7 +986,7 @@ namespace Shoko.Server.Models
                     break;
 
                 case GroupFilterConditionType.AssignedTvDBInfo:
-                    bool tvDBInfoMissing = Repo.Instance.CrossRef_AniDB_TvDB.GetByAnimeID(contractSerie.AniDB_ID).Count == 0;
+                    bool tvDBInfoMissing = Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(contractSerie.AniDB_ID,CrossRefType.TvDB).Count == 0;
                     bool supposedToHaveTvDBLink = contractSerie.AniDBAnime.AniDBAnime.AnimeType !=
                                                   (int)AnimeType.Movie &&
                                                   !(contractSerie.AniDBAnime.AniDBAnime.Restricted > 0);
@@ -1019,7 +1019,7 @@ namespace Shoko.Server.Models
                     bool restricted = (contractSerie.AniDBAnime.AniDBAnime.Restricted > 0);
                     bool movieLinkMissing = contractSerie.CrossRefAniDBMovieDB == null && !restricted;
                     bool tvlinkMissing =
-                        Repo.Instance.CrossRef_AniDB_TvDB.GetByAnimeID(contractSerie.AniDB_ID).Count == 0 &&
+                        Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(contractSerie.AniDB_ID,CrossRefType.TvDB).Count == 0 &&
                         !restricted;
                     bool bothMissing = movieLinkMissing && tvlinkMissing;
                     if (gfc.GetConditionOperatorEnum() == GroupFilterOperator.Include && bothMissing) return false;
@@ -1311,9 +1311,7 @@ namespace Shoko.Server.Models
 
         public void QueueUpdate()
         {
-            CommandRequest_RefreshGroupFilter cmdRefreshGroupFilter =
-                new CommandRequest_RefreshGroupFilter(GroupFilterID);
-            cmdRefreshGroupFilter.Save();
+            CommandQueue.Queue.Instance.Add(new CmdServerRefreshGroupFilter(GroupFilterID));
         }
 
         public override bool Equals(object obj)
@@ -1329,7 +1327,7 @@ namespace Shoko.Server.Models
             if (other.SortingCriteria != SortingCriteria) return false;
             if (Conditions == null || Conditions.Count == 0)
             {
-                using (var upd = Repo.Instance.GroupFilter.BeginAddOrUpdate(() => this))
+                using (var upd = Repo.Instance.GroupFilter.BeginAddOrUpdate(this))
                 {
                     upd.Entity.Conditions = Conditions = Repo.Instance.GroupFilterCondition.GetByGroupFilterID(GroupFilterID);
                     upd.Commit();
@@ -1337,7 +1335,7 @@ namespace Shoko.Server.Models
             }
             if (other.Conditions == null || other.Conditions.Count == 0)
             {
-                using (var upd = Repo.Instance.GroupFilter.BeginAddOrUpdate(() => this))
+                using (var upd = Repo.Instance.GroupFilter.BeginAddOrUpdate(this))
                 {
                     upd.Entity.Conditions = other.Conditions = Repo.Instance.GroupFilterCondition.GetByGroupFilterID(other.GroupFilterID);
                     upd.Commit();

@@ -4,23 +4,28 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
-using AniDBAPI;
-using AniDBAPI.Commands;
 using Shoko.Models.Server;
 using Shoko.Commons.Extensions;
 using Shoko.Models.Enums;
 using Shoko.Models.Client;
 using NutzCode.CloudFileSystem;
-using Shoko.Server.Commands;
-using Shoko.Server.Databases;
 using Shoko.Server.Models;
-using Shoko.Server.Providers.Azure;
 using Shoko.Server.Repositories;
 using Shoko.Server.Extensions;
 using Shoko.Commons.Utils;
 using Shoko.Server.Utilities;
 using System.IO;
 using Microsoft.AspNetCore.Mvc;
+using Shoko.Models.WebCache;
+using Shoko.Server.CommandQueue.Commands.AniDB;
+using Shoko.Server.CommandQueue.Commands.Server;
+using Shoko.Server.Import;
+using Shoko.Server.Providers.AniDB;
+using Shoko.Server.Providers.AniDB.Commands;
+using Shoko.Server.Providers.AniDB.Raws;
+using Shoko.Server.Providers.WebCache;
+using Shoko.Server.Renamer;
+using Shoko.Server.Settings;
 
 namespace Shoko.Server
 {
@@ -276,11 +281,7 @@ namespace Shoko.Server
             {
                 SVR_VideoLocal vid = Repo.Instance.VideoLocal.GetByID(videoLocalID);
                 if (vid == null) return;
-
-                FileFfdshowPreset ffd = Repo.Instance.FileFfdshowPreset.GetByHashAndSize(vid.Hash, vid.FileSize);
-                if (ffd == null) return;
-
-                Repo.Instance.FileFfdshowPreset.Delete(ffd.FileFfdshowPresetID);
+                Repo.Instance.FileFfdshowPreset.FindAndDelete(() => Repo.Instance.FileFfdshowPreset.GetByHashAndSize(vid.Hash, vid.FileSize));
             }
             catch (Exception ex)
             {
@@ -513,7 +514,7 @@ namespace Shoko.Server
 
                 int errorCount = 0;
                 string errorString = string.Empty;
-                string name = vid.FileName;
+                string name = vid.Info;
 
                 foreach (SVR_VideoLocal_Place place in vid.Places)
                 {
@@ -545,11 +546,8 @@ namespace Shoko.Server
                     ret.NewFileName = errorString;
                     return ret;
                 }
-                vid.FileName = name;
                 if (ret.VideoLocal == null)
-                    ret.VideoLocal = new CL_VideoLocal() { FileName = name, VideoLocalID = videoLocalID };
-                else
-                    ret.VideoLocal.FileName = name;
+                    ret.VideoLocal = new CL_VideoLocal() {VideoLocalID = videoLocalID };
             }
             catch (Exception ex)
             {
@@ -640,7 +638,7 @@ namespace Shoko.Server
                     Repo.Instance.RenameScript.BatchAction(scripts, scripts.Count, (rs, orig) => { if (contract.RenameScriptID == 0 || contract.RenameScriptID != rs.RenameScriptID) rs.IsEnabledOnImport = 0; });
                 }
 
-                using (var upd = Repo.Instance.RenameScript.BeginAddOrUpdate(() => script))
+                using (var upd = Repo.Instance.RenameScript.BeginAddOrUpdate(script))
                 {
                     upd.Entity.IsEnabledOnImport = contract.IsEnabledOnImport;
                     upd.Entity.Script = contract.Script;
@@ -669,10 +667,8 @@ namespace Shoko.Server
         {
             try
             {
-                RenameScript df = Repo.Instance.RenameScript.GetByID(renameScriptID);
-                if (df == null) return "Database entry does not exist";
-                Repo.Instance.RenameScript.Delete(renameScriptID);
-
+                if (!Repo.Instance.RenameScript.Delete(renameScriptID))
+                    return "Database entry does not exist";
                 return string.Empty;
             }
             catch (Exception ex)
@@ -743,37 +739,7 @@ namespace Shoko.Server
                         retTitles.Add(res);
                     }
                 }
-                else
-                {
-                    // title search so look at the web cache
-                    List<Shoko.Models.Azure.Azure_AnimeIDTitle> titles = AzureWebAPI.Get_AnimeTitle(titleQuery);
-
-
-                    foreach (Shoko.Models.Azure.Azure_AnimeIDTitle tit in titles)
-                    {
-                        CL_AnimeSearch res = new CL_AnimeSearch
-                        {
-                            AnimeID = tit.AnimeID,
-                            MainTitle = tit.MainTitle,
-                            Titles =
-                            new HashSet<string>(tit.Titles.Split(new char[] { '|' },
-                                StringSplitOptions.RemoveEmptyEntries))
-                        };
-
-                        // check for existing series and group details
-                        SVR_AnimeSeries ser = Repo.Instance.AnimeSeries.GetByAnimeID(tit.AnimeID);
-                        if (ser != null)
-                        {
-                            res.SeriesExists = true;
-                            res.AnimeSeriesID = ser.AnimeSeriesID;
-                            res.AnimeSeriesName = ser.GetAnime().GetFormattedTitle();
-                        }
-                        else
-                            res.SeriesExists = false;
-
-                        retTitles.Add(res);
-                    }
-                }
+               
             }
             catch (Exception ex)
             {
@@ -807,9 +773,6 @@ namespace Shoko.Server
         {
             try
             {
-                IgnoreAnime ignore = Repo.Instance.IgnoreAnime.GetByID(ignoreAnimeID);
-                if (ignore == null) return;
-
                 Repo.Instance.IgnoreAnime.Delete(ignoreAnimeID);
             }
             catch (Exception ex)
@@ -922,7 +885,7 @@ namespace Shoko.Server
                         // let's check if the file on AniDB actually exists in the user's local collection
                         string hash = string.Empty;
 
-                        AniDB_File anifile = Repo.Instance.AniDB_File.GetByFileID(myitem.FileID);
+                        AniDB_File anifile = Repo.Instance.AniDB_File.GetByID(myitem.FileID);
                         if (anifile != null)
                             hash = anifile.Hash;
                         else
@@ -1023,8 +986,7 @@ namespace Shoko.Server
         {
             foreach (CL_MissingFile missingFile in myListFiles)
             {
-                CommandRequest_DeleteFileFromMyList cmd = new CommandRequest_DeleteFileFromMyList(missingFile.FileID);
-                cmd.Save();
+                CommandQueue.Queue.Instance.Add(new CmdAniDBDeleteFileFromMyList(missingFile.FileID));
 
                 // For deletion of files from Trakt, we will rely on the Daily sync
                 // lets also try removing from the users trakt collecion
@@ -1137,8 +1099,7 @@ namespace Shoko.Server
 
                 foreach (SVR_VideoLocal vl in filesWithoutEpisode.Where(a => !string.IsNullOrEmpty(a.Hash)))
                 {
-                    CommandRequest_ProcessFile cmd = new CommandRequest_ProcessFile(vl.VideoLocalID, true);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(vl.VideoLocalID, true));
                 }
             }
             catch (Exception ex)
@@ -1157,8 +1118,7 @@ namespace Shoko.Server
 
                 foreach (SVR_VideoLocal vl in files.Where(a => !string.IsNullOrEmpty(a.Hash)))
                 {
-                    CommandRequest_ProcessFile cmd = new CommandRequest_ProcessFile(vl.VideoLocalID, true);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(vl.VideoLocalID, true));
                 }
             }
             catch (Exception ex)
@@ -1302,44 +1262,41 @@ namespace Shoko.Server
         {
             try
             {
-                foreach (DuplicateFile df in Repo.Instance.DuplicateFile.GetAll())
+                Repo.Instance.DuplicateFile.FindAndDelete(() =>
                 {
-                    if (df.GetImportFolder1() == null || df.GetImportFolder2() == null)
+                    List<DuplicateFile> todelete = new List<DuplicateFile>();
+                    foreach (DuplicateFile df in Repo.Instance.DuplicateFile.GetAll())
                     {
-                        string msg =
-                            string.Format(
-                                "Deleting duplicate file record as one of the import folders can't be found: {0} --- {1}",
-                                df.FilePathFile1, df.FilePathFile2);
-                        logger.Info(msg);
-                        Repo.Instance.DuplicateFile.Delete(df.DuplicateFileID);
-                        continue;
+                        if (df.GetImportFolder1() == null || df.GetImportFolder2() == null)
+                        {
+                            string msg = string.Format("Deleting duplicate file record as one of the import folders can't be found: {0} --- {1}", df.FilePathFile1, df.FilePathFile2);
+                            logger.Info(msg);
+                            todelete.Add(df);
+                            continue;
+                        }
+
+                        // make sure that they are not actually the same file
+                        if (df.GetFullServerPath1().Equals(df.GetFullServerPath2(), StringComparison.InvariantCultureIgnoreCase))
+                        {
+                            string msg = string.Format("Deleting duplicate file record as they are actually point to the same file: {0}", df.GetFullServerPath1());
+                            logger.Info(msg);
+                            todelete.Add(df);
+                            continue;
+                        }
+
+                        // check if both files still exist
+                        IFile file1 = SVR_VideoLocal.ResolveFile(df.GetFullServerPath1());
+                        IFile file2 = SVR_VideoLocal.ResolveFile(df.GetFullServerPath2());
+                        if (file1 == null || file2 == null)
+                        {
+                            string msg = string.Format("Deleting duplicate file record as one of the files can't be found: {0} --- {1}", df.GetFullServerPath1(), df.GetFullServerPath2());
+                            logger.Info(msg);
+                            todelete.Add(df);
+                        }
                     }
 
-                    // make sure that they are not actually the same file
-                    if (df.GetFullServerPath1()
-                        .Equals(df.GetFullServerPath2(), StringComparison.InvariantCultureIgnoreCase))
-                    {
-                        string msg =
-                            string.Format(
-                                "Deleting duplicate file record as they are actually point to the same file: {0}",
-                                df.GetFullServerPath1());
-                        logger.Info(msg);
-                        Repo.Instance.DuplicateFile.Delete(df.DuplicateFileID);
-                    }
-
-                    // check if both files still exist
-                    IFile file1 = SVR_VideoLocal.ResolveFile(df.GetFullServerPath1());
-                    IFile file2 = SVR_VideoLocal.ResolveFile(df.GetFullServerPath2());
-                    if (file1 == null || file2 == null)
-                    {
-                        string msg =
-                            string.Format(
-                                "Deleting duplicate file record as one of the files can't be found: {0} --- {1}",
-                                df.GetFullServerPath1(), df.GetFullServerPath2());
-                        logger.Info(msg);
-                        Repo.Instance.DuplicateFile.Delete(df.DuplicateFileID);
-                    }
-                }
+                    return todelete;
+                });
             }
             catch (Exception ex)
             {

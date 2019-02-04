@@ -5,7 +5,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
@@ -23,43 +22,35 @@ using NLog.Targets;
 using NutzCode.CloudFileSystem.OAuth2;
 using Shoko.Commons.Properties;
 using Shoko.Models.Enums;
-using Shoko.Models.Server;
-using Shoko.Server.Commands;
-using Shoko.Server.Commands.Azure;
-using Shoko.Server.Commands.Plex;
-using Shoko.Server.Databases;
-using Shoko.Server.Extensions;
-using Shoko.Server.FileHelper;
-using Shoko.Server.FileHelper.Subtitles;
+using Shoko.Server.API;
+using Shoko.Server.CommandQueue;
+using Shoko.Server.CommandQueue.Commands.Plex;
+using Shoko.Server.CommandQueue.Commands.Schedule;
+using Shoko.Server.CommandQueue.Commands.Server;
+using Shoko.Server.FileScanner;
 using Shoko.Server.ImageDownload;
+using Shoko.Server.Import;
 using Shoko.Server.Models;
-using Shoko.Server.MyAnime2Helper;
-using Shoko.Server.Providers.JMMAutoUpdates;
+using Shoko.Server.Native.Trinet.NTFS;
+using Shoko.Server.Providers.WebCache;
+using Shoko.Server.Providers.WebUpdates;
+using Shoko.Server.Renamer;
 using Shoko.Server.Repositories;
-using Shoko.Server.UI;
-using Trinet.Core.IO.Ntfs;
-//using Trinet.Core.IO.Ntfs;
-using UPnP;
+using Shoko.Server.Settings;
+using Shoko.Server.Utilities;
 using Action = System.Action;
-using LogLevel = NLog.LogLevel;
+using LogLevel = Microsoft.Extensions.Logging.LogLevel;
 using Timer = System.Timers.Timer;
+//using Trinet.Core.IO.Ntfs;
 
 namespace Shoko.Server
 {
     public class ShokoServer
     {
         //private static bool doneFirstTrakTinfo = false;
-        private static Logger logger = LogManager.GetCurrentClassLogger();
-        internal static LogRotator logrotator = new LogRotator();
-        private static DateTime lastTraktInfoUpdate = DateTime.Now;
-        private static DateTime lastVersionCheck = DateTime.Now;
+        private static readonly Logger logger = LogManager.GetCurrentClassLogger();
+        public static DateTime? StartTime;
 
-        public static DateTime? StartTime = null;
-
-        public static TimeSpan? UpTime => StartTime == null ? null : DateTime.Now - StartTime;
-
-        internal static BlockingList<FileSystemEventArgs> queueFileEvents = new BlockingList<FileSystemEventArgs>();
-        private static BackgroundWorker workerFileEvents = new BackgroundWorker();
 
         public static string PathAddressREST = "api/Image";
         public static string PathAddressPlex = "api/Plex";
@@ -67,50 +58,35 @@ namespace Shoko.Server
 
         private static IWebHost hostNancy;
 
-        private static BackgroundWorker workerImport = new BackgroundWorker();
-        private static BackgroundWorker workerScanFolder = new BackgroundWorker();
-        private static BackgroundWorker workerScanDropFolders = new BackgroundWorker();
-        private static BackgroundWorker workerRemoveMissing = new BackgroundWorker();
-        private static BackgroundWorker workerDeleteImportFolder = new BackgroundWorker();
-        //private static BackgroundWorker workerMyAnime2 = new BackgroundWorker();
-        private static BackgroundWorker workerMediaInfo = new BackgroundWorker();
 
-        private static BackgroundWorker workerSyncHashes = new BackgroundWorker();
-        private static BackgroundWorker workerSyncMedias = new BackgroundWorker();
+        //private static BackgroundWorker workerMyAnime2 = new BackgroundWorker();
+
 
         internal static BackgroundWorker workerSetupDB = new BackgroundWorker();
-        internal static BackgroundWorker LogRotatorWorker = new BackgroundWorker();
-
-        private static Timer autoUpdateTimer;
-        private static Timer autoUpdateTimerShort;
         private static Timer cloudWatchTimer;
-        internal static Timer LogRotatorTimer;
-
-        DateTime lastAdminMessage = DateTime.Now.Subtract(new TimeSpan(12, 0, 0));
         private static List<RecoveringFileSystemWatcher> watcherVids;
 
-        BackgroundWorker downloadImagesWorker = new BackgroundWorker();
 
-        public static List<UserCulture> userLanguages = new List<UserCulture>();
 
-        public IOAuthProvider OAuthProvider { get; set; } = new AuthProvider();
+
+
+        private ShokoServer()
+        {
+        }
+
+        public static TimeSpan? UpTime => StartTime == null ? null : DateTime.Now - StartTime;
+
+        public IOAuthProvider OAuthProvider { get; set; } = new AuthProviderNEEDREDO();
 
         internal IServiceProvider DepProvider { get; set; }
-        private Mutex mutex;
 
-        internal static ManualResetEvent _pauseFileWatchDog = new ManualResetEvent(true);
+
+        public static ShokoServer Instance { get; private set; } = new ShokoServer();
 
         public string[] GetSupportedDatabases()
         {
-            return new[]
-            {
-                "SQLite",
-                "Microsoft SQL Server 2014",
-                "MySQL/MariaDB"
-            };
+            return new[] {"SQLite", "Microsoft SQL Server 2014", "MySQL/MariaDB"};
         }
-
-        private ShokoServer() { }
 
         private static IServiceProvider BuildDi()
         {
@@ -121,15 +97,15 @@ namespace Shoko.Server
 
             services.AddSingleton<ILoggerFactory, LoggerFactory>();
             services.AddSingleton(typeof(ILogger<>), typeof(Logger<>));
-            services.AddLogging((builder) => builder.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Trace));
+            services.AddLogging((builder) => builder.SetMinimumLevel(LogLevel.Trace));
 
             var serviceProvider = services.BuildServiceProvider();
 
             var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
 
             //configure NLog
-            loggerFactory.AddNLog(new NLogProviderOptions { CaptureMessageTemplates = true, CaptureMessageProperties = true,  });
-            NLog.LogManager.LoadConfiguration("nlog.config");
+            loggerFactory.AddNLog(new NLogProviderOptions {CaptureMessageTemplates = true, CaptureMessageProperties = true,});
+            LogManager.LoadConfiguration("nlog.config");
             //Reconfigure log file to applicationpath
             var target = (FileTarget) LogManager.Configuration.FindTargetByName("file");
             target.FileName = ServerSettings.ApplicationPath + "/logs/${shortdate}.log";
@@ -140,13 +116,10 @@ namespace Shoko.Server
 
         public bool StartUpServer()
         {
-            this.DepProvider = BuildDi();
+            DepProvider = BuildDi();
 
             try
             {
-                Analytics.PostEvent("Server", "Startup");
-                if (Utils.IsLinux)
-                    Analytics.PostEvent("Server", "Linux Startup");
                 Thread.CurrentThread.CurrentUICulture = CultureInfo.GetCultureInfo(ServerSettings.Instance.Culture);
 
                 // Check if any of the DLL are blocked, common issue with daily builds
@@ -160,8 +133,7 @@ namespace Shoko.Server
                 // this needs to run before UnhandledExceptionManager.AddHandler(), because that will probably lock the log file
                 if (!MigrateProgramDataLocation())
                 {
-                    Utils.ShowErrorMessage(Resources.Migration_LoadError,
-                        Resources.ShokoServer);
+                    Utils.ShowErrorMessage(Resources.Migration_LoadError, Resources.ShokoServer);
                     Environment.Exit(1);
                 }
 
@@ -174,7 +146,6 @@ namespace Shoko.Server
                 }
 
                 //HibernatingRhinos.Profiler.Appender.NHibernate.NHibernateProfiler.Initialize();
-                CommandHelper.LoadCommands();
 
                 try
                 {
@@ -182,12 +153,12 @@ namespace Shoko.Server
                 }
                 catch (Exception e)
                 {
-                    logger.Log(LogLevel.Error, e);
+                    logger.Log(NLog.LogLevel.Error, e);
                 }
 
                 try
                 {
-                    mutex = Mutex.OpenExisting(ServerSettings.DefaultInstance + "Mutex");
+                    Mutex.OpenExisting(ServerSettings.DefaultInstance + "Mutex");
                     //since it hasn't thrown an exception, then we already have one copy of the app open.
                     return false;
                     //MessageBox.Show(Shoko.Commons.Properties.Resources.Server_Running,
@@ -198,22 +169,12 @@ namespace Shoko.Server
                 {
                     //since we didn't find a mutex with that name, create one
                     Debug.WriteLine("Exception thrown:" + Ex.Message + " Creating a new mutex...");
-                    mutex = new Mutex(true, ServerSettings.DefaultInstance + "Mutex");
+                    var _=new Mutex(true, ServerSettings.DefaultInstance + "Mutex");
                 }
+
                 ServerSettings.Instance.DebugSettingsToLog();
                 RenameFileHelper.InitialiseRenamers();
 
-                workerFileEvents.WorkerReportsProgress = false;
-                workerFileEvents.WorkerSupportsCancellation = false;
-                workerFileEvents.DoWork += WorkerFileEvents_DoWork;
-                workerFileEvents.RunWorkerCompleted += WorkerFileEvents_RunWorkerCompleted;
-
-                //logrotator worker setup
-                LogRotatorWorker.WorkerReportsProgress = false;
-                LogRotatorWorker.WorkerSupportsCancellation = false;
-                LogRotatorWorker.DoWork += LogRotatorWorker_DoWork;
-                LogRotatorWorker.RunWorkerCompleted +=
-                    LogRotatorWorker_RunWorkerCompleted;
 
                 ServerState.Instance.DatabaseAvailable = false;
                 ServerState.Instance.ServerOnline = false;
@@ -222,45 +183,6 @@ namespace Shoko.Server
                 ServerState.Instance.StartupFailedMessage = string.Empty;
                 ServerState.Instance.BaseImagePath = ImageUtils.GetBaseImagesPath();
 
-                downloadImagesWorker.DoWork += DownloadImagesWorker_DoWork;
-                downloadImagesWorker.WorkerSupportsCancellation = true;
-
-                /*workerMyAnime2.DoWork += WorkerMyAnime2_DoWork;
-            workerMyAnime2.RunWorkerCompleted += WorkerMyAnime2_RunWorkerCompleted;
-            workerMyAnime2.ProgressChanged += WorkerMyAnime2_ProgressChanged;
-            workerMyAnime2.WorkerReportsProgress = true;*/
-
-                workerMediaInfo.DoWork += WorkerMediaInfo_DoWork;
-
-                workerImport.WorkerReportsProgress = true;
-                workerImport.WorkerSupportsCancellation = true;
-                workerImport.DoWork += WorkerImport_DoWork;
-
-                workerScanFolder.WorkerReportsProgress = true;
-                workerScanFolder.WorkerSupportsCancellation = true;
-                workerScanFolder.DoWork += WorkerScanFolder_DoWork;
-
-
-                workerScanDropFolders.WorkerReportsProgress = true;
-                workerScanDropFolders.WorkerSupportsCancellation = true;
-                workerScanDropFolders.DoWork += WorkerScanDropFolders_DoWork;
-
-
-                workerSyncHashes.WorkerReportsProgress = true;
-                workerSyncHashes.WorkerSupportsCancellation = true;
-                workerSyncHashes.DoWork += WorkerSyncHashes_DoWork;
-
-                workerSyncMedias.WorkerReportsProgress = true;
-                workerSyncMedias.WorkerSupportsCancellation = true;
-                workerSyncMedias.DoWork += WorkerSyncMedias_DoWork;
-
-                workerRemoveMissing.WorkerReportsProgress = true;
-                workerRemoveMissing.WorkerSupportsCancellation = true;
-                workerRemoveMissing.DoWork += WorkerRemoveMissing_DoWork;
-
-                workerDeleteImportFolder.WorkerReportsProgress = false;
-                workerDeleteImportFolder.WorkerSupportsCancellation = true;
-                workerDeleteImportFolder.DoWork += WorkerDeleteImportFolder_DoWork;
 
                 workerSetupDB.WorkerReportsProgress = true;
                 workerSetupDB.ProgressChanged += (sender, args) => WorkerSetupDB_ReportProgress();
@@ -289,13 +211,9 @@ namespace Shoko.Server
                 InitCulture();
                 Instance = this;
 
-                // run rotator once and set 24h delay
-                logrotator.Start();
-                StartLogRotatorTimer();
 
                 SetupNetHosts();
 
-                Analytics.PostEvent("Server", "StartupFinished");
                 return true;
             }
             catch (Exception e)
@@ -313,8 +231,9 @@ namespace Shoko.Server
                 // do stuff on windows only
                 return true;
             }
-            string programlocation =
-                        Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
+
+            string programlocation = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
+            // ReSharper disable once AssignNullToNotNullAttribute
             string[] dllFiles = Directory.GetFiles(programlocation, "*.dll", SearchOption.AllDirectories);
             bool result = true;
 
@@ -332,11 +251,12 @@ namespace Shoko.Server
                     }
                 }
             }
+
             foreach (string dllFile in dllFiles)
             {
                 if (FileSystem.AlternateDataStreamExists(dllFile, "Zone.Identifier"))
                 {
-                    logger.Log(LogLevel.Error, "Found blocked DLL file: " + dllFile);
+                    logger.Log(NLog.LogLevel.Error, "Found blocked DLL file: " + dllFile);
                     result = false;
                 }
             }
@@ -347,23 +267,13 @@ namespace Shoko.Server
 
         public bool MigrateProgramDataLocation()
         {
-            string oldApplicationPath =
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "JMMServer");
-            string newApplicationPath =
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                    Assembly.GetEntryAssembly().GetName().Name);
+            string oldApplicationPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "JMMServer");
+            string newApplicationPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), Assembly.GetEntryAssembly().GetName().Name);
             if (Directory.Exists(oldApplicationPath) && !Directory.Exists(newApplicationPath))
             {
                 try
                 {
-                    List<MigrationDirectory> migrationdirs = new List<MigrationDirectory>
-                    {
-                        new MigrationDirectory
-                        {
-                            From = oldApplicationPath,
-                            To = newApplicationPath
-                        }
-                    };
+                    List<MigrationDirectory> migrationdirs = new List<MigrationDirectory> {new MigrationDirectory {From = oldApplicationPath, To = newApplicationPath}};
 
                     foreach (MigrationDirectory md in migrationdirs)
                     {
@@ -373,33 +283,29 @@ namespace Shoko.Server
                         }
                     }
 
-                    logger.Log(LogLevel.Info, "Successfully migrated programdata folder.");
+                    logger.Log(NLog.LogLevel.Info, "Successfully migrated programdata folder.");
                 }
                 catch (Exception e)
                 {
-                    logger.Log(LogLevel.Error, "Error occured during MigrateProgramDataLocation()");
+                    logger.Log(NLog.LogLevel.Error, "Error occured during MigrateProgramDataLocation()");
                     logger.Error(e);
                     return false;
                 }
             }
+
             return true;
         }
 
-        void UninstallJMMServer()
+        private void UninstallJMMServer()
         {
             if (Utils.IsLinux) return; //This will be handled by the OS or user, as we cannot reliably learn what package management system they use.
             try
             {
                 // Check in registry if installed
-                string jmmServerUninstallPath =
-                    (string)
-                    Registry.GetValue(
-                        @"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{898530ED-CFC7-4744-B2B8-A8D98A2FA06C}_is1",
-                        "UninstallString", null);
+                string jmmServerUninstallPath = (string) Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{898530ED-CFC7-4744-B2B8-A8D98A2FA06C}_is1", "UninstallString", null);
 
                 if (!string.IsNullOrEmpty(jmmServerUninstallPath))
                 {
-
                     // Ask if user wants to uninstall first
                     bool res = Utils.ShowYesNo(Resources.DuplicateInstallDetectedQuestion, Resources.DuplicateInstallDetected);
 
@@ -407,29 +313,25 @@ namespace Shoko.Server
                     {
                         try
                         {
-                            ProcessStartInfo startInfo = new ProcessStartInfo
-                            {
-                                FileName = jmmServerUninstallPath,
-                                Arguments = " /SILENT"
-                            };
+                            ProcessStartInfo startInfo = new ProcessStartInfo {FileName = jmmServerUninstallPath, Arguments = " /SILENT"};
                             Process.Start(startInfo);
 
-                            logger.Log(LogLevel.Info, "JMM Server successfully uninstalled");
+                            logger.Log(NLog.LogLevel.Info, "JMM Server successfully uninstalled");
                         }
                         catch
                         {
-                            logger.Log(LogLevel.Error, "Error occured during uninstall of JMM Server");
+                            logger.Log(NLog.LogLevel.Error, "Error occured during uninstall of JMM Server");
                         }
                     }
                     else
                     {
-                        logger.Log(LogLevel.Info, "User cancelled JMM Server uninstall");
+                        logger.Log(NLog.LogLevel.Info, "User cancelled JMM Server uninstall");
                     }
                 }
             }
             catch (Exception ex)
             {
-                logger.Log(LogLevel.Error, "Error occured during UninstallJMMServer: " + ex);
+                logger.Log(NLog.LogLevel.Error, "Error occured during UninstallJMMServer: " + ex);
             }
         }
 
@@ -452,20 +354,23 @@ namespace Shoko.Server
                     catch (Exception exception)
                     {
                         Utils.ShowErrorMessage("Unable start hosting");
-                        logger.Error("Unable to run task: " + (action.Method?.Name ?? action.ToString()));
+                        logger.Error("Unable to run task: " + (action.Method.Name));
                         logger.Error(exception);
                     }
                     finally
                     {
                         ShutDown();
                     }
+
                     return false;
                 }
-                    Utils.ShowErrorMessage("Unable to start hosting, please run JMMServer as administrator once.");
-                    logger.Error(e);
-                    ShutDown();
-                    return false;
-                }
+
+                Utils.ShowErrorMessage("Unable to start hosting, please run JMMServer as administrator once.");
+                logger.Error(e);
+                ShutDown();
+                return false;
+            }
+
             return true;
         }
 
@@ -475,7 +380,6 @@ namespace Shoko.Server
             {
                 ThreadStart ts = () =>
                 {
-
                     ServerSettings.DoServerShutdown(new ServerSettings.ReasonedEventArgs());
                     Environment.Exit(0);
                 };
@@ -483,27 +387,59 @@ namespace Shoko.Server
             }
             catch (Exception ex)
             {
-                logger.Log(LogLevel.Error, $"Error occured during ApplicationShutdown: {ex.Message}");
+                logger.Log(NLog.LogLevel.Error, $"Error occured during ApplicationShutdown: {ex.Message}");
             }
         }
 
-        private void LogRotatorWorker_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
+
+        private void InitCulture()
         {
-            // for later use
         }
 
-        private void LogRotatorWorker_DoWork(object sender, DoWorkEventArgs e)
+        #region Update all media info
+
+        public static void RefreshAllMediaInfo()
         {
-            logrotator.Start();
+            Queue.Instance.Add(new CmdServerReadAllMediaInfo());
         }
 
-        public static ShokoServer Instance { get; private set; } = new ShokoServer();
+        #endregion
 
-        private void WorkerSyncHashes_DoWork(object sender, DoWorkEventArgs e)
+        public void DownloadAllImages()
+        {
+            Queue.Instance.Add(new CmdServerGetImages());
+        }
+
+        public event EventHandler<UpdateEventArgs> UpdateAvailable;
+
+        public void CheckForUpdatesNew(bool forceShowForm)
         {
             try
             {
-                Importer.SyncHashes();
+                long verCurrent;
+                long verNew;
+
+                // get the latest version as according to the release
+
+                // get the user's version
+                Assembly a = Assembly.GetEntryAssembly();
+                if (a == null)
+                {
+                    logger.Error("Could not get current version");
+                    return;
+                }
+
+                AssemblyName an = a.GetName();
+
+                //verNew = verInfo.versions.ServerVersionAbs;
+
+                verNew = AutoUpdatesHelper.ConvertToAbsoluteVersion(AutoUpdatesHelper.GetLatestVersionNumber(ServerSettings.Instance.UpdateChannel));
+                verCurrent = an.Version.Revision * 100 + an.Version.Build * 100 * 100 + an.Version.Minor * 100 * 100 * 100 + an.Version.Major * 100 * 100 * 100 * 100;
+
+                if (forceShowForm || verNew > verCurrent)
+                {
+                    UpdateAvailable?.Invoke(this, new UpdateEventArgs(verNew, verCurrent, forceShowForm));
+                }
             }
             catch (Exception ex)
             {
@@ -511,109 +447,374 @@ namespace Shoko.Server
             }
         }
 
-        private void WorkerSyncMedias_DoWork(object sender, DoWorkEventArgs e)
+
+        #region Tray Minimize
+
+        private void ShutDown()
         {
-            try
-            {
-                Importer.SyncMedia();
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
+            StopWatchingFiles();
+            AniDBDispose();
+            StopHost();
+            ServerShutdown?.Invoke(this, null);
         }
 
-        void WorkerFileEvents_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
-        {
-            logger.Info("Stopped thread for processing file creation events");
-        }
+        #endregion
 
-        void WorkerFileEvents_DoWork(object sender, DoWorkEventArgs e)
+
+        public static void StartWatchingFiles(bool log = true)
         {
-            logger.Info("Started thread for processing file events");
-            _pauseFileWatchDog.WaitOne(Timeout.Infinite);
-            foreach (FileSystemEventArgs evt in queueFileEvents)
+            StopWatchingFiles();
+            StopCloudWatchTimer();
+            watcherVids = new List<RecoveringFileSystemWatcher>();
+
+            foreach (SVR_ImportFolder share in Repo.Instance.ImportFolder.GetAll())
             {
                 try
                 {
-                    // this is a message to stop processing
-                    if (evt == null)
+                    if (share.FolderIsWatched && log)
                     {
-                        return;
+                        logger.Info($"Watching ImportFolder: {share.ImportFolderName} || {share.ImportFolderLocation}");
                     }
-                    if (evt.ChangeType == WatcherChangeTypes.Created || evt.ChangeType == WatcherChangeTypes.Renamed)
+
+                    if (share.CloudID == null && Directory.Exists(share.ImportFolderLocation) && share.FolderIsWatched)
                     {
-                        if (evt.FullPath.StartsWith("|CLOUD|"))
-                        {
-                            int shareid = int.Parse(evt.Name);
-                            Importer.RunImport_ImportFolderNewFiles(Repo.Instance.ImportFolder.GetByID(shareid));
-                        }
-                        else
-                        {
-                            // When the path that was created represents a directory we need to manually get the contained files to add.
-                            // The reason for this is that when a directory is moved into a source directory (from the same drive) we will only recieve
-                            // an event for the directory and not the contained files. However, if the folder is copied from a different drive then
-                            // a create event will fire for the directory and each file contained within it (As they are all treated as separate operations)
+                        if (log) logger.Info($"Parsed ImportFolderLocation: {share.ImportFolderLocation}");
+                        RecoveringFileSystemWatcher fsw = new RecoveringFileSystemWatcher {Path = share.ImportFolderLocation};
 
-                            // This is faster and doesn't throw on weird paths. I've had some UTF-16/UTF-32 paths cause serious issues
-                            if (Directory.Exists(evt.FullPath)) // filter out invalid events
-                            {
-                                logger.Info("New folder detected: {0}: {1}", evt.FullPath, evt.ChangeType);
+                        // Handle all type of events not just created ones
+                        fsw.Created += Fsw_CreateHandler;
+                        fsw.Renamed += Fsw_RenameHandler;
 
-                                string[] files = Directory.GetFiles(evt.FullPath, "*.*", SearchOption.AllDirectories);
-
-                                foreach (string file in files)
-                                {
-                                    if (FileHashHelper.IsVideo(file))
-                                    {
-                                        logger.Info("Found file {0} under folder {1}", file, evt.FullPath);
-
-                                        CommandRequest_HashFile cmd = new CommandRequest_HashFile(file, false);
-                                        cmd.Save();
-                                    }
-                                }
-                            }
-                            else if (File.Exists(evt.FullPath))
-                            {
-                                logger.Info("New file detected: {0}: {1}", evt.FullPath, evt.ChangeType);
-
-                                if (FileHashHelper.IsVideo(evt.FullPath))
-                                {
-                                    logger.Info("Found file {0}", evt.FullPath);
-
-                                    CommandRequest_HashFile cmd = new CommandRequest_HashFile(evt.FullPath, false);
-                                    cmd.Save();
-                                }
-                            }
-                            // else it was deleted before we got here
-                        }
+                        // Commented out buffer size as it breaks on UNC paths or mapped drives
+                        //fsw.InternalBufferSize = 81920;
+                        fsw.IncludeSubdirectories = true;
+                        fsw.EnableRaisingEvents = true;
+                        watcherVids.Add(fsw);
                     }
-                    if (queueFileEvents.Contains(evt))
+                    else if (!share.FolderIsWatched)
                     {
-                        queueFileEvents.Remove(evt);
+                        if (log) logger.Info("ImportFolder found but not watching: {0} || {1}", share.ImportFolderName, share.ImportFolderLocation);
                     }
                 }
                 catch (Exception ex)
                 {
-                    logger.Error(ex, "FSEvents_DoWork file: {0}\n{1}", evt.Name, ex);
-                    queueFileEvents.Remove(evt);
-                    Thread.Sleep(1000);
+                    logger.Error(ex, ex.ToString());
                 }
+            }
+
+            StartCloudWatchTimer();
+        }
+
+
+        public static void StopWatchingFiles()
+        {
+            if (watcherVids == null)
+                return;
+            foreach (RecoveringFileSystemWatcher fsw in watcherVids)
+            {
+                fsw.EnableRaisingEvents = false;
+                fsw.Dispose();
+            }
+
+            watcherVids.Clear();
+        }
+
+        private static void Fsw_CreateHandler(object sender, FileSystemEventArgs e)
+        {
+            try
+            {
+                Queue.Instance.Add(new CmdServerFileWatch(e));
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
             }
         }
 
-        void InitCulture()
+        private static void Fsw_RenameHandler(object sender, RenamedEventArgs e)
         {
+            try
+            {
+                Queue.Instance.Add(new CmdServerFileWatch(e));
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+            }
+        }
 
+        public static void ScanDropFolders()
+        {
+            Queue.Instance.Add(new CmdServerScanDropFolders());
+        }
+
+        public static void SyncHashes()
+        {
+            Queue.Instance.Add(new CmdServerSyncHashes());
+        }
+
+        public static void SyncMedias()
+        {
+            Queue.Instance.Add(new CmdServerSyncMediaInfos());
+        }
+
+        public static void ScanFolder(int importFolderID)
+        {
+            Queue.Instance.Add(new CmdServerScanFolder(importFolderID));
+        }
+
+        public static void RunImport()
+        {
+            Queue.Instance.Add(new CmdServerImport());
+        }
+
+        public static void RemoveMissingFiles()
+        {
+            Queue.Instance.Add(new CmdServerRemoveMissingFiles());
+        }
+
+        public static void SyncMyList()
+        {
+            Importer.CheckForMyListSyncUpdate(true);
+        }
+
+        public static void DeleteImportFolder(int importFolderID)
+        {
+            Queue.Instance.Add(new CmdServerDeleteFolder(importFolderID));
         }
 
 
-#region Database settings and initial start up
+        /// <summary>
+        ///     Running Nancy and Validating all require aspects before running it
+        /// </summary>
+        private static void StartNancyHost()
+        {
+            /*foreach (string ext in SubtitleHelper.Extensions.Keys)
+            {
+                if (!MimeTypes.GetMimeType("file." + ext)
+                    .Equals("application/octet-stream", StringComparison.InvariantCultureIgnoreCase)) continue;
+                if (!SubtitleHelper.Extensions[ext]
+                    .Equals("application/octet-stream", StringComparison.InvariantCultureIgnoreCase))
+                    MimeTypes.AddType(ext, SubtitleHelper.Extensions[ext]);
+            }
+
+            if (MimeTypes.GetMimeType("file.mkv") == "application/octet-stream")
+            {
+                MimeTypes.AddType("mkv", "video/x-matroska");
+                MimeTypes.AddType("mka", "audio/x-matroska");
+                MimeTypes.AddType("mk3d", "video/x-matroska-3d");
+                MimeTypes.AddType("ogm", "video/ogg");
+                MimeTypes.AddType("flv", "video/x-flv");
+            }*/
+
+            if (hostNancy != null)
+                return;
+
+            // This requires admin, so throw an error if it fails
+            // Don't let Nancy do this. We do it ourselves.
+            // This needs to throw an error for our url registration to call.
+
+
+            /*config.UrlReservations.CreateAutomatically = false;
+            config.RewriteLocalhost = true;
+            config.AllowChunkedEncoding = false;*/
+
+            hostNancy = new WebHostBuilder().UseKestrel(options => { options.ListenAnyIP(ServerSettings.Instance.ServerPort); }).UseStartup<Startup>()
+#if DEBUG
+                .ConfigureLogging(logging =>
+                {
+                    logging.ClearProviders();
+                    logging.SetMinimumLevel(LogLevel.Trace);
+                    logging.AddNLog();
+                })
+#endif
+                .Build();
+
+            //JsonSettings.MaxJsonLength = int.MaxValue;
+
+            // Even with error callbacks, this may still throw an error in some parts, so log it!
+            try
+            {
+                hostNancy.Start();
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex);
+            }
+        }
+
+      
+        public static void StopHost()
+        {
+            hostNancy?.Dispose();
+            hostNancy = null;
+        }
+
+        private static void SetupAniDBProcessor()
+        {
+            ShokoService.AnidbProcessor.Init(ServerSettings.Instance.AniDb.Username, ServerSettings.Instance.AniDb.Password, ServerSettings.Instance.AniDb.ServerAddress, ServerSettings.Instance.AniDb.ServerPort, ServerSettings.Instance.AniDb.ClientPort);
+        }
+
+        public static void AniDBDispose()
+        {
+            logger.Info("Disposing...");
+            if (ShokoService.AnidbProcessor != null)
+            {
+                ShokoService.AnidbProcessor.ForceLogout();
+                ShokoService.AnidbProcessor.Dispose();
+                Thread.Sleep(1000);
+            }
+        }
+
+        /// <summary>
+        ///     Sync plex watch status.
+        /// </summary>
+        /// <returns>true if there was any commands added to the queue, flase otherwise</returns>
+        public bool SyncPlex()
+        {
+            bool flag = false;
+            foreach (SVR_JMMUser user in Repo.Instance.JMMUser.GetAll())
+            {
+                if (!string.IsNullOrEmpty(user.PlexToken))
+                {
+                    flag = true;
+                    Queue.Instance.Add(new CmdPlexSyncWatched(user));
+                }
+            }
+
+            return flag;
+        }
+
+        public void EnableStartWithWindows()
+        {
+            ServerState state = ServerState.Instance;
+
+            if (state.IsAutostartEnabled)
+            {
+                return;
+            }
+
+            if (state.autostartMethod == AutostartMethod.Registry)
+            {
+                try
+                {
+                    state.AutostartRegistryKey.SetValue(state.autostartKey, "\"" + Assembly.GetEntryAssembly().Location + "\"");
+                    state.LoadSettings();
+                }
+                catch (Exception ex)
+                {
+                    logger.Debug(ex, "Creating autostart key");
+                }
+            }
+            else if (state.autostartMethod == AutostartMethod.TaskScheduler)
+            {
+                Task task = TaskService.Instance.GetTask(state.autostartTaskName);
+                if (task != null)
+                {
+                    TaskService.Instance.RootFolder.DeleteTask(task.Name);
+                }
+
+                TaskDefinition td = TaskService.Instance.NewTask();
+                td.RegistrationInfo.Description = "Auto start task for JMM Server";
+
+                td.Principal.RunLevel = TaskRunLevel.Highest;
+
+                td.Triggers.Add(new BootTrigger());
+                td.Triggers.Add(new LogonTrigger());
+
+                //needs to have the "path:" else it fails
+                td.Actions.Add(path: "\"" + Assembly.GetEntryAssembly().Location + "\"");
+
+                TaskService.Instance.RootFolder.RegisterTaskDefinition(state.autostartTaskName, td);
+                state.LoadSettings();
+            }
+        }
+
+        public void DisableStartWithWindows()
+        {
+            ServerState state = ServerState.Instance;
+            if (!state.IsAutostartEnabled)
+            {
+                return;
+            }
+
+            if (state.autostartMethod == AutostartMethod.Registry)
+            {
+                try
+                {
+                    state.AutostartRegistryKey.DeleteValue(state.autostartKey, false);
+                    state.LoadSettings();
+                }
+                catch (Exception ex)
+                {
+                    logger.Debug(ex, "Deleting autostart key");
+                }
+            }
+            else if (state.autostartMethod == AutostartMethod.TaskScheduler)
+            {
+                Task task = TaskService.Instance.GetTask(state.autostartTaskName);
+
+                if (task == null) return;
+                TaskService.Instance.RootFolder.DeleteTask(task.Name);
+                state.LoadSettings();
+            }
+        }
+
+        public bool SetNancyPort(ushort port)
+        {
+            if (!Utils.IsAdministrator()) return false;
+
+
+            StopHost();
+
+            ServerSettings.Instance.ServerPort = port;
+
+            bool started = NetPermissionWrapper(StartNancyHost);
+            if (!started)
+            {
+                StopHost();
+                throw new Exception("Failed to start all of the network hosts");
+            }
+
+            return true;
+        }
+
+        public void CheckForUpdates()
+        {
+            Assembly a = Assembly.GetExecutingAssembly();
+            ServerState.Instance.ApplicationVersion = Utils.GetApplicationVersion(a);
+            ServerState.Instance.ApplicationVersionExtra = Utils.GetApplicationExtraVersion(a);
+
+            logger.Info("Checking for updates...");
+            CheckForUpdatesNew(false);
+        }
+
+        public static void RunWorkSetupDB() => workerSetupDB.RunWorkerAsync();
+
+
+        public class UpdateEventArgs : EventArgs
+        {
+            public UpdateEventArgs(long newVersion, long oldVersion, bool force)
+            {
+                NewVersion = newVersion;
+                OldVersion = oldVersion;
+                Forced = force;
+            }
+
+            public bool Forced { get; }
+
+            public long OldVersion { get; }
+            public long NewVersion { get; }
+        }
+
+
+        #region Database settings and initial start up
 
         public event EventHandler LoginFormNeeded;
         public event EventHandler DatabaseSetup;
         public event EventHandler DBSetupCompleted;
-        void WorkerSetupDB_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
+
+        private void WorkerSetupDB_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
         {
             ServerState.Instance.ServerStarting = false;
             bool setupComplete = bool.Parse(e.Result.ToString());
@@ -626,7 +827,7 @@ namespace Shoko.Server
             }
         }
 
-        void WorkerSetupDB_ReportProgress()
+        private void WorkerSetupDB_ReportProgress()
         {
             logger.Info("Starting Server: Complete!");
             ServerInfo.Instance.RefreshImportFolders();
@@ -635,47 +836,21 @@ namespace Shoko.Server
             ServerState.Instance.ServerOnline = true;
             ServerSettings.Instance.FirstRun = false;
             ServerSettings.Instance.SaveSettings();
-            if (string.IsNullOrEmpty(ServerSettings.Instance.AniDb.Username) ||
-                string.IsNullOrEmpty(ServerSettings.Instance.AniDb.Password))
+            if (string.IsNullOrEmpty(ServerSettings.Instance.AniDb.Username) || string.IsNullOrEmpty(ServerSettings.Instance.AniDb.Password))
                 LoginFormNeeded?.Invoke(Instance, null);
             DBSetupCompleted?.Invoke(Instance, null);
         }
 
         private void ShowDatabaseSetup() => DatabaseSetup?.Invoke(Instance, null);
 
-        public static void StartFileWorker()
-        {
-            if (!workerFileEvents.IsBusy)
-                workerFileEvents.RunWorkerAsync();
-        }
 
         public static void StartCloudWatchTimer()
         {
-            cloudWatchTimer = new Timer
-            {
-                AutoReset = true,
-                Interval = ServerSettings.Instance.CloudWatcherTime * 60 * 1000
-            };
+            cloudWatchTimer = new Timer {AutoReset = true, Interval = ServerSettings.Instance.CloudWatcherTime * 60 * 1000};
             cloudWatchTimer.Elapsed += CloudWatchTimer_Elapsed;
             cloudWatchTimer.Start();
         }
 
-        public static void StartLogRotatorTimer()
-        {
-            LogRotatorTimer = new Timer
-            {
-                AutoReset = true,
-                // 86400000 = 24h
-                Interval = 86400000
-            };
-            LogRotatorTimer.Elapsed += LogRotatorTimer_Elapsed;
-            LogRotatorTimer.Start();
-        }
-
-        private static void LogRotatorTimer_Elapsed(object sender, ElapsedEventArgs e)
-        {
-            logrotator.Start();
-        }
 
         public static void StopCloudWatchTimer()
         {
@@ -686,14 +861,11 @@ namespace Shoko.Server
         {
             try
             {
-                foreach (SVR_ImportFolder share in Repo.Instance.ImportFolder.GetAll()
-                    .Where(a => a.CloudID.HasValue && a.FolderIsWatched))
+                foreach (SVR_ImportFolder share in Repo.Instance.ImportFolder.GetAll().Where(a => a.CloudID.HasValue && a.FolderIsWatched))
                 {
                     //Little hack in there to reuse the file queue
-                    FileSystemEventArgs args = new FileSystemEventArgs(WatcherChangeTypes.Created, "|CLOUD|",
-                        share.ImportFolderID.ToString());
-                    queueFileEvents.Add(args);
-                    StartFileWorker();
+                    FileSystemEventArgs args = new FileSystemEventArgs(WatcherChangeTypes.Created, "|CLOUD|", share.ImportFolderID.ToString());
+                    Queue.Instance.Add(new CmdServerFileWatch(args));
                 }
             }
             catch (Exception ex)
@@ -714,14 +886,14 @@ namespace Shoko.Server
                 throw new Exception("Failed to start all of the network hosts");
             }
         }
-        
+
         public void RestartAniDBSocket()
         {
             AniDBDispose();
             SetupAniDBProcessor();
         }
 
-        void WorkerSetupDB_DoWork(object sender, DoWorkEventArgs e)
+        private void WorkerSetupDB_DoWork(object sender, DoWorkEventArgs e)
         {
             Thread.CurrentThread.CurrentUICulture = CultureInfo.GetCultureInfo(ServerSettings.Instance.Culture);
 
@@ -737,23 +909,8 @@ namespace Shoko.Server
 
                 RestartAniDBSocket();
 
-                ShokoService.CmdProcessorGeneral.Stop();
-                ShokoService.CmdProcessorHasher.Stop();
-                ShokoService.CmdProcessorImages.Stop();
+                Queue.Instance.Stop();
 
-
-                // wait until the queue count is 0
-                // ie the cancel has actuall worked
-                while (true)
-                {
-                    if (ShokoService.CmdProcessorGeneral.QueueCount == 0 &&
-                        ShokoService.CmdProcessorHasher.QueueCount == 0 &&
-                        ShokoService.CmdProcessorImages.QueueCount == 0) break;
-                    Thread.Sleep(250);
-                }
-
-                if (autoUpdateTimer != null) autoUpdateTimer.Enabled = false;
-                if (autoUpdateTimerShort != null) autoUpdateTimerShort.Enabled = false;
 
                 //DatabaseFactory.CloseSessionFactory();
 
@@ -763,23 +920,30 @@ namespace Shoko.Server
                 ServerState.Instance.CurrentSetupStatus = Resources.Server_DatabaseSetup;
 
                 logger.Info("Setting up database...");
+                //Repo.Init(new ShokoContext(ServerSettings.Instance.Database.Type, ))
                 var repo = new Repo();
-                if (!repo.Start() || !repo.Migrate() || !repo.DoInit(Repo.ProgressMonitor))
+                if (!repo.Start() || !repo.Migrate() || !repo.DoInit())
+                    //if (!DatabaseFactory.InitDB(out string errorMessage))
                 {
                     ServerState.Instance.DatabaseAvailable = false;
-                    
+
+                    /*if (string.IsNullOrEmpty(ServerSettings.Instance.Database.Type))
+                        ServerState.Instance.CurrentSetupStatus =
+                            Resources.Server_DatabaseConfig;*/
                     e.Result = false;
                     ServerState.Instance.StartupFailed = true;
-                    ServerState.Instance.StartupFailedMessage = "An error occured";//errorMessage;
+                    ServerState.Instance.StartupFailedMessage = "An error occured"; //errorMessage;
                     return;
                 }
 
                 ServerState.Instance.DatabaseAvailable = true;
 
-                logger.Info("Initializing Session Factory...");
 
                 Scanner.Instance.Init();
+                logger.Info("Logging into WebCache if needed...");
+                WebCacheAPI.Instance.RefreshToken();
 
+                logger.Info("Initializing Session Factory...");
 
                 //init session factory
                 ServerState.Instance.CurrentSetupStatus = Resources.Server_InitializingSession;
@@ -787,32 +951,18 @@ namespace Shoko.Server
 
 
                 ServerState.Instance.CurrentSetupStatus = Resources.Server_InitializingQueue;
-                ShokoService.CmdProcessorGeneral.Init();
-                ShokoService.CmdProcessorHasher.Init();
-                ShokoService.CmdProcessorImages.Init();
+
+                Queue.Instance.Start();
 
 
-                // timer for automatic updates
-                autoUpdateTimer = new Timer
-                {
-                    AutoReset = true,
-                    Interval = 5 * 60 * 1000 // 5 * 60 seconds (5 minutes)
-                };
-                autoUpdateTimer.Elapsed += AutoUpdateTimer_Elapsed;
-                autoUpdateTimer.Start();
+                //Add Logrotator if needed
+                Queue.Instance.Add(new CmdScheduleLogRotation(), DateTime.UtcNow.AddSeconds(CmdScheduleLogRotation.LogRotationTimeInSeconds));
+                Queue.Instance.Add(new CmdScheduleShortUpdate());
+                Queue.Instance.Add(new CmdScheduleUpdate());
 
-                // timer for automatic updates
-                autoUpdateTimerShort = new Timer
-                {
-                    AutoReset = true,
-                    Interval = 5 * 1000 // 5 seconds, later we set it to 30 seconds
-                };
-                autoUpdateTimerShort.Elapsed += AutoUpdateTimerShort_Elapsed;
-                autoUpdateTimerShort.Start();
 
                 ServerState.Instance.CurrentSetupStatus = Resources.Server_InitializingFile;
 
-                StartFileWorker();
 
                 StartWatchingFiles();
 
@@ -839,31 +989,11 @@ namespace Shoko.Server
             }
         }
 
-#endregion
+        #endregion
 
-#region Update all media info
 
-        void WorkerMediaInfo_DoWork(object sender, DoWorkEventArgs e)
-        {
-            // first build a list of files that we already know about, as we don't want to process them again
-            IReadOnlyList<SVR_VideoLocal> filesAll = Repo.Instance.VideoLocal.GetAll();
-            foreach (SVR_VideoLocal vl in filesAll)
-            {
-                CommandRequest_ReadMediaInfo cr = new CommandRequest_ReadMediaInfo(vl.VideoLocalID);
-                cr.Save();
-            }
-        }
+        #region MyAnime2 Migration
 
-        public static void RefreshAllMediaInfo()
-        {
-            if (workerMediaInfo.IsBusy) return;
-            workerMediaInfo.RunWorkerAsync();
-        }
-
-#endregion
-
-        
-#region MyAnime2 Migration
         /*
         public event EventHandler<ProgressChangedEventArgs> MyAnime2ProgressChanged;
         
@@ -956,9 +1086,7 @@ namespace Shoko.Server
                                 // if not we will download it now
                                 if (Repo.Instance.AniDB_GroupStatus.GetByAnimeID(anime.AnimeID).Count == 0)
                                 {
-                                    CommandRequest_GetReleaseGroupStatus cmdStatus =
-                                        new CommandRequest_GetReleaseGroupStatus(anime.AnimeID, false);
-                                    cmdStatus.Save();
+                                    CommandQueue.Queue.Instance.Add(new CmdGetReleaseGroupStatus(anime.AnimeID, false));
                                 }
 
                                 // update stats
@@ -999,8 +1127,7 @@ namespace Shoko.Server
                             // Add this file to the users list
                             if (ServerSettings.Instance.AniDb.MyList_AddFiles)
                             {
-                                CommandRequest_AddFileToMyList cmd = new CommandRequest_AddFileToMyList(vid.ED2KHash);
-                                cmd.Save();
+                                CommandQueue.Queue.Instance.Add(new CmdAddFileToMyList(vid.ED2KHash));
                             }
 
                             ma2Progress.MigratedFiles = ma2Progress.MigratedFiles + 1;
@@ -1032,192 +1159,10 @@ namespace Shoko.Server
         {
         }
         */
-#endregion
 
-        private void GenerateAzureList()
-        {
-            // get a lst of anime's that we already have
-            IReadOnlyList<SVR_AniDB_Anime> allAnime = Repo.Instance.AniDB_Anime.GetAll();
-            Dictionary<int, int> localAnimeIDs = new Dictionary<int, int>();
-            foreach (SVR_AniDB_Anime anime in allAnime)
-            {
-                localAnimeIDs[anime.AnimeID] = anime.AnimeID;
-            }
+        #endregion
 
-            // loop through the list of valid anime id's and add the ones we don't have yet
-            Dictionary<int, int> validAnimeIDs = new Dictionary<int, int>();
-
-            string line;
-            StreamReader file =
-                new StreamReader(@"e:\animetitles.txt");
-            while ((line = file.ReadLine()) != null)
-            {
-                string[] titlesArray = line.Split('|');
-
-                try
-                {
-                    int aid = int.Parse(titlesArray[0]);
-                    if (!localAnimeIDs.ContainsKey(aid))
-                        validAnimeIDs[aid] = aid;
-                }
-                catch
-                {
-                }
-            }
-
-            file.Close();
-
-            string aids = string.Empty;
-            var shuffledList = validAnimeIDs.Values.OrderBy(a => Guid.NewGuid());
-            int i = 0;
-            foreach (int animeID in shuffledList)
-            {
-                i++;
-                if (!string.IsNullOrEmpty(aids)) aids += ",";
-                aids += animeID;
-
-                if (i == 250)
-                {
-                    logger.Info(aids);
-                    aids = string.Empty;
-                    i = 0;
-                }
-            }
-
-            logger.Info(aids);
-        }
-
-        private void SendToAzureXML()
-        {
-            DateTime dt = DateTime.Now.AddYears(-2);
-            IReadOnlyList<SVR_AniDB_Anime> allAnime = Repo.Instance.AniDB_Anime.GetAll();
-
-            int sentAnime = 0;
-            foreach (SVR_AniDB_Anime anime in allAnime)
-            {
-                if (!anime.EndDate.HasValue) continue;
-
-                if (anime.EndDate.Value > dt) continue;
-
-                sentAnime++;
-                CommandRequest_Azure_SendAnimeXML cmd = new CommandRequest_Azure_SendAnimeXML(anime.AnimeID);
-                cmd.Save();
-            }
-
-            logger.Info($"Sent Anime XML to Cache: {sentAnime} out of {allAnime.Count}");
-        }
-
-        private void SendToAzure()
-        {
-            Dictionary<int, int> validAnimeIDs = new Dictionary<int, int>();
-
-            string line;
-
-            // Read the file and display it line by line.
-            StreamReader file = new StreamReader(@"e:\animetitles.txt");
-            while ((line = file.ReadLine()) != null)
-            {
-                string[] titlesArray = line.Split('|');
-
-                try
-                {
-                    int aid = int.Parse(titlesArray[0]);
-                    validAnimeIDs[aid] = aid;
-                }
-                catch
-                {
-                }
-            }
-
-            file.Close();
-
-            string aids =
-                "9516,6719,9606,8751,7453,6969,7821,7738,6694,6854,6101,8267,9398,9369,7395,7687,7345,8748,6350,6437,6408,7824,6334,8976,4651,7329,6433,8750,9498,8306,6919,8598,6355,6084,6775,8482,6089,7441,7541,7130,9013,6299,6983,7740,6329,6401,9459,8458,8800,7290,8859,6957,8503,6057,7758,7086,7943,8007,8349,6858,7776,7194,8807,6822,8058,7274,6818,9309,9488,7564,9593,8906,6155,7191,7267,7861,7109,9617,7954,7944,6359,7877,7701,7447,8736,7260,8492,9107,9578,6843,7190,9036,7614,6404,6018,8895,6234,6855,7041,7504,6847,6889,7092,8672,9452,9086,8770,4515,8103,8100,8122,9441,7025,8403,6335,9607,8559,7193,7273,7553,6242,7108,7052,6171,9634,7846,8471,7772,7557,9597,7827,6039,6712,7784,7830,8330,6902,6187,8431,8258,7956,7373,8083,8130,7535,8003,8237,7153,8170,7439,8094,9332,6539,6773,6812,7220,7703,7406,7670,7876,8497,8407,7299,9299,7583,7825,7556,6950,8127,7147,7747,9009,6044,6393,6864,7616,9567,8612,6705,7139,7070,6804,7901,8133,7817,6596,6553,8073,6718,8303,7782,8724,6972,8671,6907,8030,7030,7141,6878,8036,8231,7594,6813,7920,7841,7922,7095,6927,6754,6936,7427,7497,9251,7253,8140,9601,6735,7160,7538,6893,7203,7346,6797,6516,8500,8245,8440,7863,7467,7975,8808,6277,6481,6733,8790,7117,7063,6924,8293,6208,6882,6892";
-            string[] aidArray = aids.Split(',');
-
-            logger.Info($"Queueing {aidArray.Length} anime updates");
-            int cnt = 0;
-            foreach (string animeid in aidArray)
-            {
-                if (validAnimeIDs.ContainsKey(int.Parse(animeid)))
-                {
-                    CommandRequest_GetAnimeHTTP cmd = new CommandRequest_GetAnimeHTTP(int.Parse(animeid), true, false);
-                    cmd.Save();
-                    cnt++;
-                }
-            }
-            logger.Info($"Queued {cnt} anime updates");
-        }
-
-        public void DownloadAllImages()
-        {
-            if (!downloadImagesWorker.IsBusy)
-                downloadImagesWorker.RunWorkerAsync();
-        }
-
-        void DownloadImagesWorker_DoWork(object sender, DoWorkEventArgs e)
-        {
-            Importer.RunImport_GetImages();
-        }
-
-        public class UpdateEventArgs : EventArgs
-        {
-            public UpdateEventArgs(long newVersion, long oldVersion, bool force)
-            {
-                NewVersion = newVersion;
-                OldVersion = oldVersion;
-                Forced = force;
-            }
-
-            public bool Forced { get; }
-
-            public long OldVersion { get; }
-            public long NewVersion { get; }
-        }
-
-        public event EventHandler<UpdateEventArgs> UpdateAvailable;
-
-        public void CheckForUpdatesNew(bool forceShowForm)
-        {
-            try
-            {
-                long verCurrent = 0;
-                long verNew = 0;
-
-                // get the latest version as according to the release
-
-                // get the user's version
-                Assembly a = Assembly.GetEntryAssembly();
-                if (a == null)
-                {
-                    logger.Error("Could not get current version");
-                    return;
-                }
-                AssemblyName an = a.GetName();
-
-                //verNew = verInfo.versions.ServerVersionAbs;
-
-                verNew =
-                    JMMAutoUpdatesHelper.ConvertToAbsoluteVersion(
-                        JMMAutoUpdatesHelper.GetLatestVersionNumber(ServerSettings.Instance.UpdateChannel))
-                    ;
-                verCurrent = an.Version.Revision * 100 +
-                             an.Version.Build * 100 * 100 +
-                             an.Version.Minor * 100 * 100 * 100 +
-                             an.Version.Major * 100 * 100 * 100 * 100;
-
-                if (forceShowForm || verNew > verCurrent)
-                {
-                    UpdateAvailable?.Invoke(this, new UpdateEventArgs(verNew, verCurrent, forceShowForm));
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-#region UI events and methods
+        #region UI events and methods
 
         internal static string GetLocalIPv4(NetworkInterfaceType _type)
         {
@@ -1247,561 +1192,16 @@ namespace Shoko.Server
         public event EventHandler ServerShutdown;
         public event EventHandler ServerRestart;
 
-        void ShutdownServer()
+        public void ShutdownServer()
         {
             ServerShutdown?.Invoke(this, null);
         }
 
-        void RestartServer()
+        public void RestartServer()
         {
             ServerRestart?.Invoke(this, null);
         }
 
-#endregion
-
-        void AutoUpdateTimerShort_Elapsed(object sender, ElapsedEventArgs e)
-        {
-            autoUpdateTimerShort.Enabled = false;
-            //ShokoService.CmdProcessorImages.NotifyOfNewCommand();
-
-            CheckForAdminMesages();
-
-
-            autoUpdateTimerShort.Interval = 30 * 1000; // 30 seconds
-            autoUpdateTimerShort.Enabled = true;
-        }
-
-        private void CheckForAdminMesages()
-        {
-            try
-            {
-                TimeSpan lastUpdate = DateTime.Now - lastAdminMessage;
-
-                if (lastUpdate.TotalHours > 5)
-                {
-                    lastAdminMessage = DateTime.Now;
-                    ServerInfo.Instance.RefreshAdminMessages();
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-#region Tray Minimize
-
-        private void ShutDown()
-        {
-            StopWatchingFiles();
-            AniDBDispose();
-            StopHost();
-            ServerShutdown?.Invoke(this, null);
-            Analytics.PostEvent("Server", "Shutdown");
-        }
-
-#endregion
-
-        static void AutoUpdateTimer_Elapsed(object sender, ElapsedEventArgs e)
-        {
-            Importer.CheckForDayFilters();
-            Importer.CheckForCalendarUpdate(false);
-            Importer.CheckForAnimeUpdate(false);
-            Importer.CheckForTvDBUpdates(false);
-            Importer.CheckForMyListSyncUpdate(false);
-            Importer.CheckForTraktAllSeriesUpdate(false);
-            Importer.CheckForTraktTokenUpdate(false);
-            Importer.CheckForMyListStatsUpdate(false);
-            Importer.CheckForAniDBFileUpdate(false);
-            Importer.UpdateAniDBTitles();
-            Importer.SendUserInfoUpdate(false);
-        }
-
-        public static void StartWatchingFiles(bool log = true)
-        {
-            StopWatchingFiles();
-            StopCloudWatchTimer();
-            watcherVids = new List<RecoveringFileSystemWatcher>();
-
-            foreach (SVR_ImportFolder share in Repo.Instance.ImportFolder.GetAll())
-            {
-                try
-                {
-                    if (share.FolderIsWatched && log)
-                    {
-                        logger.Info($"Watching ImportFolder: {share.ImportFolderName} || {share.ImportFolderLocation}");
-                    }
-                    if (share.CloudID == null && Directory.Exists(share.ImportFolderLocation) && share.FolderIsWatched)
-                    {
-                        if (log) logger.Info($"Parsed ImportFolderLocation: {share.ImportFolderLocation}");
-                        RecoveringFileSystemWatcher fsw = new RecoveringFileSystemWatcher
-                        {
-                            Path = share.ImportFolderLocation
-                        };
-
-                        // Handle all type of events not just created ones
-                        fsw.Created += Fsw_CreateHandler;
-                        fsw.Renamed += Fsw_RenameHandler;
-
-                        // Commented out buffer size as it breaks on UNC paths or mapped drives
-                        //fsw.InternalBufferSize = 81920;
-                        fsw.IncludeSubdirectories = true;
-                        fsw.EnableRaisingEvents = true;
-                        watcherVids.Add(fsw);
-                    }
-                    else if (!share.FolderIsWatched)
-                    {
-                        if (log) logger.Info("ImportFolder found but not watching: {0} || {1}", share.ImportFolderName,
-                            share.ImportFolderLocation);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    logger.Error(ex, ex.ToString());
-                }
-            }
-            StartCloudWatchTimer();
-        }
-
-
-        public static void StopWatchingFiles()
-        {
-            if (watcherVids == null)
-                return;
-            foreach (RecoveringFileSystemWatcher fsw in watcherVids)
-            {
-                fsw.EnableRaisingEvents = false;
-                fsw.Dispose();
-            }
-            watcherVids.Clear();
-        }
-
-        static void Fsw_CreateHandler(object sender, FileSystemEventArgs e)
-        {
-            try
-            {
-                queueFileEvents.Add(e);
-                StartFileWorker();
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-        static void Fsw_RenameHandler(object sender, RenamedEventArgs e)
-        {
-            try
-            {
-                queueFileEvents.Add(e);
-                StartFileWorker();
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-        public static void ScanDropFolders()
-        {
-            if (!workerScanDropFolders.IsBusy)
-                workerScanDropFolders.RunWorkerAsync();
-        }
-
-        public static void SyncHashes()
-        {
-            if (!workerSyncHashes.IsBusy)
-                workerSyncHashes.RunWorkerAsync();
-        }
-
-        public static void SyncMedias()
-        {
-            if (!workerSyncMedias.IsBusy)
-                workerSyncMedias.RunWorkerAsync();
-        }
-
-        public static void ScanFolder(int importFolderID)
-        {
-            if (!workerScanFolder.IsBusy)
-                workerScanFolder.RunWorkerAsync(importFolderID);
-        }
-
-        public static void RunImport()
-        {
-            Analytics.PostEvent("Importer", "Run");
-
-            if (!workerImport.IsBusy)
-                workerImport.RunWorkerAsync();
-        }
-
-        public static void RemoveMissingFiles()
-        {
-            Analytics.PostEvent("Importer", "RemoveMissing");
-
-            if (!workerRemoveMissing.IsBusy)
-                workerRemoveMissing.RunWorkerAsync();
-        }
-
-        public static void SyncMyList()
-        {
-            Importer.CheckForMyListSyncUpdate(true);
-        }
-
-        public static void DeleteImportFolder(int importFolderID)
-        {
-            if (!workerDeleteImportFolder.IsBusy)
-                workerDeleteImportFolder.RunWorkerAsync(importFolderID);
-        }
-
-        static void WorkerRemoveMissing_DoWork(object sender, DoWorkEventArgs e)
-        {
-            try
-            {
-                Importer.RemoveRecordsWithoutPhysicalFiles();
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-        void WorkerDeleteImportFolder_DoWork(object sender, DoWorkEventArgs e)
-        {
-            try
-            {
-                int importFolderID = int.Parse(e.Argument.ToString());
-                Importer.DeleteImportFolder(importFolderID);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-        static void WorkerScanFolder_DoWork(object sender, DoWorkEventArgs e)
-        {
-            try
-            {
-                Importer.RunImport_ScanFolder(int.Parse(e.Argument.ToString()));
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-        void WorkerScanDropFolders_DoWork(object sender, DoWorkEventArgs e)
-        {
-            try
-            {
-                Importer.RunImport_DropFolders();
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-        static void WorkerImport_DoWork(object sender, DoWorkEventArgs e)
-        {
-            try
-            {
-                Importer.RunImport_NewFiles();
-                Importer.RunImport_IntegrityCheck();
-
-                // drop folder
-                Importer.RunImport_DropFolders();
-
-                // TvDB association checks
-                Importer.RunImport_ScanTvDB();
-
-                // Trakt association checks
-                Importer.RunImport_ScanTrakt();
-
-                // MovieDB association checks
-                Importer.RunImport_ScanMovieDB();
-
-                // Check for missing images
-                Importer.RunImport_GetImages();
-
-                // Check for previously ignored files
-                Importer.CheckForPreviouslyIgnored();
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-            }
-        }
-
-
-        /// <summary>
-        /// Running Nancy and Validating all require aspects before running it
-        /// </summary>
-        private static void StartNancyHost()
-        {
-            /*foreach (string ext in SubtitleHelper.Extensions.Keys)
-            {
-                if (!MimeTypes.GetMimeType("file." + ext)
-                    .Equals("application/octet-stream", StringComparison.InvariantCultureIgnoreCase)) continue;
-                if (!SubtitleHelper.Extensions[ext]
-                    .Equals("application/octet-stream", StringComparison.InvariantCultureIgnoreCase))
-                    MimeTypes.AddType(ext, SubtitleHelper.Extensions[ext]);
-            }
-
-            if (MimeTypes.GetMimeType("file.mkv") == "application/octet-stream")
-            {
-                MimeTypes.AddType("mkv", "video/x-matroska");
-                MimeTypes.AddType("mka", "audio/x-matroska");
-                MimeTypes.AddType("mk3d", "video/x-matroska-3d");
-                MimeTypes.AddType("ogm", "video/ogg");
-                MimeTypes.AddType("flv", "video/x-flv");
-            }*/
-
-            if (hostNancy != null)
-                return;
-
-            // This requires admin, so throw an error if it fails
-            // Don't let Nancy do this. We do it ourselves.
-            // This needs to throw an error for our url registration to call.
-
-
-            /*config.UrlReservations.CreateAutomatically = false;
-            config.RewriteLocalhost = true;
-            config.AllowChunkedEncoding = false;*/
-
-            hostNancy = new WebHostBuilder()
-                .UseKestrel(options =>
-                {
-                    options.ListenAnyIP(ServerSettings.Instance.ServerPort);
-                })
-                .UseStartup<API.Startup>()
-                #if DEBUG
-                .ConfigureLogging(logging =>
-                {
-                    logging.ClearProviders();
-                    logging.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Trace);
-                    logging.AddNLog();
-                })
-                #endif
-                .Build();
-
-            //JsonSettings.MaxJsonLength = int.MaxValue;
-
-            // Even with error callbacks, this may still throw an error in some parts, so log it!
-            try
-            {
-                hostNancy.Start();
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex);
-            }
-        }
-
-        private static void ReadFiles()
-        {
-            // Steps for processing a file
-            // 1. Check if it is a video file
-            // 2. Check if we have a VideoLocal record for that file
-            // .........
-
-            // get a complete list of files
-            List<string> fileList = new List<string>();
-            foreach (SVR_ImportFolder share in Repo.Instance.ImportFolder.GetAll())
-            {
-                logger.Debug("Import Folder: {0} || {1}", share.ImportFolderName, share.ImportFolderLocation);
-                Utils.GetFilesForImportFolder(share.BaseDirectory, ref fileList);
-            }
-            
-            // get a list of all the shares we are looking at
-            int filesFound = 0, videosFound = 0;
-            int i = 0;
-
-            // get a list of all files in the share
-            foreach (string fileName in fileList)
-            {
-                i++;
-                filesFound++;
-
-                if (fileName.Contains("Sennou"))
-                {
-                    logger.Info("Processing File {0}/{1} --- {2}", i, fileList.Count, fileName);
-                }
-
-                if (!FileHashHelper.IsVideo(fileName)) continue;
-
-                videosFound++;
-            }
-            logger.Debug("Found {0} files", filesFound);
-            logger.Debug("Found {0} videos", videosFound);
-        }
-
-        public static void StopHost()
-        {
-            hostNancy?.Dispose();
-            hostNancy = null;
-        }
-
-        private static void SetupAniDBProcessor()
-        {
-            ShokoService.AnidbProcessor.Init(ServerSettings.Instance.AniDb.Username, ServerSettings.Instance.AniDb.Password,
-                ServerSettings.Instance.AniDb.ServerAddress,
-                ServerSettings.Instance.AniDb.ServerPort, ServerSettings.Instance.AniDb.ClientPort);
-        }
-
-        public static void AniDBDispose()
-        {
-            logger.Info("Disposing...");
-            if (ShokoService.AnidbProcessor != null)
-            {
-                ShokoService.AnidbProcessor.ForceLogout();
-                ShokoService.AnidbProcessor.Dispose();
-                Thread.Sleep(1000);
-            }
-        }
-
-        public static int OnHashProgress(string fileName, int percentComplete)
-        {
-            //string msg = Path.GetFileName(fileName);
-            //if (msg.Length > 35) msg = msg.Substring(0, 35);
-            //logger.Info("{0}% Hashing ({1})", percentComplete, Path.GetFileName(fileName));
-            return 1; //continue hashing (return 0 to abort)
-        }
-
-        /// <summary>
-        /// Sync plex watch status.
-        /// </summary>
-        /// <returns>true if there was any commands added to the queue, flase otherwise</returns>
-        public bool SyncPlex()
-        {
-            Analytics.PostEvent("Plex", "SyncAll");
-
-            bool flag = false;
-            foreach (SVR_JMMUser user in Repo.Instance.JMMUser.GetAll())
-            {
-                if (!string.IsNullOrEmpty(user.PlexToken))
-                {
-                    flag = true;
-                    new CommandRequest_PlexSyncWatched(user).Save();
-                }
-            }
-            return flag;
-        }
-
-        public void EnableStartWithWindows()
-        {
-            ServerState state = ServerState.Instance;
-
-            if (state.IsAutostartEnabled)
-            {
-                return;
-            }
-
-            if (state.autostartMethod == AutostartMethod.Registry)
-            {
-                try
-                {
-                    state.AutostartRegistryKey.SetValue(state.autostartKey,
-                        "\"" + Assembly.GetEntryAssembly().Location + "\"");
-                    state.LoadSettings();
-                }
-                catch (Exception ex)
-                {
-                    logger.Debug(ex , "Creating autostart key");
-                }
-            }
-            else if (state.autostartMethod == AutostartMethod.TaskScheduler)
-            {
-                Task task = TaskService.Instance.GetTask(state.autostartTaskName);
-                if (task != null)
-                {
-                    TaskService.Instance.RootFolder.DeleteTask(task.Name);
-                }
-
-                TaskDefinition td = TaskService.Instance.NewTask();
-                td.RegistrationInfo.Description = "Auto start task for JMM Server";
-
-                td.Principal.RunLevel = TaskRunLevel.Highest;
-
-                td.Triggers.Add(new BootTrigger());
-                td.Triggers.Add(new LogonTrigger());
-
-                //needs to have the "path:" else it fails
-                td.Actions.Add(path: "\"" + Assembly.GetEntryAssembly().Location + "\"");
-
-                TaskService.Instance.RootFolder.RegisterTaskDefinition(state.autostartTaskName, td);
-                state.LoadSettings();
-            }
-        }
-
-        public void DisableStartWithWindows()
-        {
-            ServerState state = ServerState.Instance;
-            if (!state.IsAutostartEnabled)
-            {
-                return;
-            }
-
-            if (state.autostartMethod == AutostartMethod.Registry)
-            {
-                try
-                {
-                    state.AutostartRegistryKey.DeleteValue(state.autostartKey, false);
-                    state.LoadSettings();
-                }
-                catch (Exception ex)
-                {
-                    logger.Debug(ex, "Deleting autostart key");
-                }
-            }
-            else if (state.autostartMethod == AutostartMethod.TaskScheduler)
-            {
-                Task task = TaskService.Instance.GetTask(state.autostartTaskName);
-
-                if (task == null) return;
-                TaskService.Instance.RootFolder.DeleteTask(task.Name);
-                state.LoadSettings();
-            }
-        }
-
-        public bool SetNancyPort(ushort port)
-        {
-            if (!Utils.IsAdministrator()) return false;
-
-            ShokoService.CmdProcessorGeneral.Paused = true;
-            ShokoService.CmdProcessorHasher.Paused = true;
-            ShokoService.CmdProcessorImages.Paused = true;
-
-            StopHost();
-
-            ServerSettings.Instance.ServerPort = port;
-
-            bool started = NetPermissionWrapper(StartNancyHost);
-            if (!started)
-            {
-                StopHost();
-                throw new Exception("Failed to start all of the network hosts");
-            }
-
-            ShokoService.CmdProcessorGeneral.Paused = false;
-            ShokoService.CmdProcessorHasher.Paused = false;
-            ShokoService.CmdProcessorImages.Paused = false;
-            return true;
-        }
-
-        public void CheckForUpdates()
-        {
-            Assembly a = Assembly.GetExecutingAssembly();
-                ServerState.Instance.ApplicationVersion = Utils.GetApplicationVersion(a);
-                ServerState.Instance.ApplicationVersionExtra = Utils.GetApplicationExtraVersion(a);
-
-            logger.Info("Checking for updates...");
-            CheckForUpdatesNew(false);
-        }
-
-        //public static bool IsMyAnime2WorkerBusy() => workerMyAnime2.IsBusy;
-
-        //public static void RunMyAnime2Worker(string filename) => workerMyAnime2.RunWorkerAsync(filename);
-        public static void RunWorkSetupDB() => workerSetupDB.RunWorkerAsync();
+        #endregion
     }
 }

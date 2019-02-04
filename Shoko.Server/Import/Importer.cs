@@ -1,31 +1,36 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.IO;
-using Shoko.Models.Server;
-using Shoko.Models.Azure;
-using Shoko.Models.Enums;
-using Shoko.Server.Commands;
-using Shoko.Server.Commands.AniDB;
-//using Shoko.Server.Commands.Azure;
+using System.Linq;
 using NLog;
-using Shoko.Server.Databases;
 using NutzCode.CloudFileSystem;
 using Shoko.Commons.Extensions;
 using Shoko.Commons.Queue;
+using Shoko.Models.Enums;
 using Shoko.Models.Queue;
+using Shoko.Models.Server;
+using Shoko.Server.CommandQueue.Commands;
+using Shoko.Server.CommandQueue.Commands.AniDB;
+using Shoko.Server.CommandQueue.Commands.Hash;
+using Shoko.Server.CommandQueue.Commands.Image;
+using Shoko.Server.CommandQueue.Commands.Server;
+using Shoko.Server.CommandQueue.Commands.Trakt;
+using Shoko.Server.CommandQueue.Commands.TvDB;
+using Shoko.Server.CommandQueue.Commands.WebCache;
+using Shoko.Server.Extensions;
 using Shoko.Server.Models;
-using Shoko.Server.FileHelper;
 using Shoko.Server.PlexAndKodi;
-using Shoko.Server.Providers.Azure;
 using Shoko.Server.Providers.MovieDB;
 using Shoko.Server.Providers.TraktTV;
-using Shoko.Server.Extensions;
-using Shoko.Server.Repositories;
 using Shoko.Server.Providers.TvDB;
-using Shoko.Server.Commands.Azure;
+using Shoko.Server.Providers.WebCache;
+using Shoko.Server.Repositories;
+using Shoko.Server.Settings;
+using Utils = Shoko.Server.Utilities.Utils;
 
-namespace Shoko.Server
+//using Shoko.Server.Commands.Azure;
+
+namespace Shoko.Server.Import
 {
     public class Importer
     {
@@ -43,8 +48,7 @@ namespace Shoko.Server
                 SVR_VideoLocal_Place p = vl.GetBestVideoLocalPlace(true);
                 if (p != null)
                 {
-                    CommandRequest_HashFile cmd = new CommandRequest_HashFile(p.FullServerPath, false);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdHashFile(p.FullServerPath, false));
                 }
             }
 
@@ -57,8 +61,7 @@ namespace Shoko.Server
                     SVR_VideoLocal_Place p = vl.GetBestVideoLocalPlace(true);
                     if (p != null)
                     {
-                        CommandRequest_HashFile cmd = new CommandRequest_HashFile(p.FullServerPath, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdHashFile(p.FullServerPath, false));
                     }
                 }
                 catch (Exception ex)
@@ -72,8 +75,7 @@ namespace Shoko.Server
             foreach (SVR_VideoLocal v in Repo.Instance.VideoLocal.GetVideosWithoutEpisode()
                 .Where(a => !string.IsNullOrEmpty(a.Hash)))
             {
-                CommandRequest_ProcessFile cmd = new CommandRequest_ProcessFile(v.VideoLocalID, false);
-                cmd.Save();
+                CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(v.VideoLocalID, false));
             }
 
             // check that all the episode data is populated
@@ -86,8 +88,7 @@ namespace Shoko.Server
                     if (xref.CrossRefSource != (int) CrossRefSource.AniDB) continue;
                     if (aniFile == null)
                     {
-                        CommandRequest_ProcessFile cmd = new CommandRequest_ProcessFile(vl.VideoLocalID, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(vl.VideoLocalID, false));
                     }
                 }
 
@@ -105,122 +106,13 @@ namespace Shoko.Server
                 if (missingEpisodes)
                 {
                     // this will then download the anime etc
-                    CommandRequest_ProcessFile cmd = new CommandRequest_ProcessFile(vl.VideoLocalID, false);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(vl.VideoLocalID, false));
                 }
             }
         }
 
-        public static void SyncMedia()
-        {
-            List<SVR_VideoLocal> allfiles = Repo.Instance.VideoLocal.GetAll().ToList();
-            AzureWebAPI.Send_Media(allfiles);
-        }
 
-        public static void SyncHashes()
-        {
-            bool paused = ShokoService.CmdProcessorHasher.Paused;
-            ShokoService.CmdProcessorHasher.Paused = true;
-            List<SVR_VideoLocal> allfiles = Repo.Instance.VideoLocal.GetAll().ToList();
-            List<SVR_VideoLocal> missfiles = allfiles.Where(
-                    a =>
-                        string.IsNullOrEmpty(a.CRC32) || string.IsNullOrEmpty(a.SHA1) ||
-                        string.IsNullOrEmpty(a.MD5) || a.SHA1 == "0000000000000000000000000000000000000000" ||
-                        a.MD5 == "00000000000000000000000000000000")
-                .ToList();
-            List<SVR_VideoLocal> withfiles = allfiles.Except(missfiles).ToList();
-            Dictionary<int,(string ed2k, string crc32, string md5, string sha1)> updates=new Dictionary<int, (string ed2k, string crc32, string md5, string sha1)>();
 
-            //Check if we can populate md5,sha and crc from AniDB_Files
-            foreach (SVR_VideoLocal v in missfiles.ToList())
-            {
-                ShokoService.CmdProcessorHasher.QueueState = new QueueStateStruct()
-                {
-                    queueState = QueueStateEnum.CheckingFile,
-                    extraParams = new[] {v.FileName}
-                };
-                SVR_AniDB_File file = Repo.Instance.AniDB_File.GetByHash(v.ED2KHash);
-                if (file != null)
-                {
-                    if (!string.IsNullOrEmpty(file.CRC) && !string.IsNullOrEmpty(file.SHA1) &&
-                        !string.IsNullOrEmpty(file.MD5))
-                    {
-                        updates[v.VideoLocalID]=(file.Hash, file.CRC,file.MD5,file.SHA1);
-                        missfiles.Remove(v);
-                        withfiles.Add(v);
-                        continue;
-                    }
-                }
-                List<Azure_FileHash> ls = AzureWebAPI.Get_FileHash(FileHashType.ED2K, v.ED2KHash);
-                if (ls != null)
-                {
-                    ls = ls.Where(
-                            a =>
-                                !string.IsNullOrEmpty(a.CRC32) && !string.IsNullOrEmpty(a.MD5) &&
-                                !string.IsNullOrEmpty(a.SHA1))
-                        .ToList();
-                    if (ls.Count > 0)
-                    {
-                        updates[v.VideoLocalID] = (ls[0].ED2K.ToUpperInvariant(),ls[0].CRC32.ToUpperInvariant(), ls[0].MD5.ToUpperInvariant(), ls[0].SHA1.ToUpperInvariant());
-                        missfiles.Remove(v);
-                    }
-                }
-            }
-
-            //We need to recalculate the sha1, md5 and crc32 of the missing ones.
-            List<SVR_VideoLocal> tosend = new List<SVR_VideoLocal>();
-            foreach (SVR_VideoLocal v in missfiles)
-            {
-                try
-                {
-                    SVR_VideoLocal_Place p = v.GetBestVideoLocalPlace();
-                    if (p != null && p.ImportFolder.CloudID == 0)
-                    {
-                        ShokoService.CmdProcessorHasher.QueueState = new QueueStateStruct()
-                        {
-                            queueState = QueueStateEnum.HashingFile,
-                            extraParams = new[] {v.FileName}
-                        };
-                        Hashes h = FileHashHelper.GetHashInfo(p.FullServerPath, true, ShokoServer.OnHashProgress,
-                            true,
-                            true,
-                            true);
-                        updates[v.VideoLocalID] = (h.ED2K, h.CRC32, h.MD5, h.SHA1);
-                        v.Hash = h.ED2K;
-                        v.CRC32 = h.CRC32;
-                        v.MD5 = h.MD5;
-                        v.SHA1 = h.SHA1;
-                        v.HashSource = (int) HashSource.DirectHash;
-                        withfiles.Add(v);
-                    }
-                }
-                catch
-                {
-                    //Ignored
-                }
-            }
-            if (updates.Count > 0)
-            {
-                using (var upd = Repo.Instance.VideoLocal.BeginBatchUpdate(() => Repo.Instance.VideoLocal.GetMany(updates.Keys)))
-                {
-                    foreach (SVR_VideoLocal v in upd)
-                    {
-                        (string ed2k, string crc32, string md5, string sha1) t = updates[v.VideoLocalID];
-                        v.Hash = t.ed2k;
-                        v.CRC32 = t.crc32;
-                        v.MD5 = t.md5;
-                        v.SHA1 = t.sha1;
-                        upd.Update(v);
-                    }
-                    upd.Commit();
-                }
-            }
-            //Send the hashes
-            AzureWebAPI.Send_FileHash(withfiles);
-            logger.Info("Sync Hashes Complete");
-
-            ShokoService.CmdProcessorHasher.Paused = paused;
-        }
 
         public static void RunImport_ScanFolder(int importFolderID)
         {
@@ -277,15 +169,14 @@ namespace Shoko.Server
                     filesFound++;
                     logger.Trace("Processing File {0}/{1} --- {2}", i, fileList.Count, fileName);
 
-                    if (!FileHashHelper.IsVideo(fileName)) continue;
+                    if (!Utils.IsVideo(fileName)) continue;
 
                     videosFound++;
 
 
 
 
-                    CommandRequest_HashFile cr_hashfile = new CommandRequest_HashFile(fileName, false);
-                    cr_hashfile.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdHashFile(fileName, false));
                 }
                 logger.Debug("Found {0} new files", filesFound);
                 logger.Debug("Found {0} videos", videosFound);
@@ -325,12 +216,11 @@ namespace Shoko.Server
                 filesFound++;
                 logger.Trace("Processing File {0}/{1} --- {2}", i, fileList.Count, fileName);
 
-                if (!FileHashHelper.IsVideo(fileName)) continue;
+                if (!Utils.IsVideo(fileName)) continue;
 
                 videosFound++;
 
-                CommandRequest_HashFile cr_hashfile = new CommandRequest_HashFile(fileName, false);
-                cr_hashfile.Save();
+                CommandQueue.Queue.Instance.Add(new CmdHashFile(fileName, false));
             }
             logger.Debug("Found {0} files", filesFound);
             logger.Debug("Found {0} videos", videosFound);
@@ -403,12 +293,11 @@ namespace Shoko.Server
                 filesFound++;
                 logger.Trace("Processing File {0}/{1} --- {2}", i, fileList.Count, fileName);
 
-                if (!FileHashHelper.IsVideo(fileName)) continue;
+                if (!Utils.IsVideo(fileName)) continue;
 
                 videosFound++;
 
-                CommandRequest_HashFile cr_hashfile = new CommandRequest_HashFile(fileName, false);
-                cr_hashfile.Save();
+                CommandQueue.Queue.Instance.Add(new CmdHashFile(fileName, false));
             }
             logger.Debug("Found {0} files", filesFound);
             logger.Debug("Found {0} videos", videosFound);
@@ -437,12 +326,11 @@ namespace Shoko.Server
                 filesFound++;
                 logger.Trace("Processing File {0}/{1} --- {2}", i, fileList.Count, fileName);
 
-                if (!FileHashHelper.IsVideo(fileName)) continue;
+                if (!Utils.IsVideo(fileName)) continue;
 
                 videosFound++;
 
-                CommandRequest_HashFile cr_hashfile = new CommandRequest_HashFile(fileName, false);
-                cr_hashfile.Save();
+                CommandQueue.Queue.Instance.Add(new CmdHashFile(fileName, false));
             }
             logger.Debug("Found {0} files", filesFound);
             logger.Debug("Found {0} videos", videosFound);
@@ -461,8 +349,7 @@ namespace Shoko.Server
                 bool fileExists = File.Exists(anime.PosterPath);
                 if (!fileExists)
                 {
-                    CommandRequest_DownloadAniDBImages cmd = new CommandRequest_DownloadAniDBImages(anime.AnimeID, false);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdImageDownloadAllAniDb(anime.AnimeID, false));
                 }
             }
 
@@ -498,9 +385,7 @@ namespace Shoko.Server
 
                     if (!fileExists && postersAvailable < ServerSettings.Instance.TvDB.AutoPostersAmount)
                     {
-                        CommandRequest_DownloadImage cmd = new CommandRequest_DownloadImage(tvPoster.TvDB_ImagePosterID,
-                            ImageEntityType.TvDB_Cover, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdImageDownload(tvPoster.TvDB_ImagePosterID, ImageEntityType.TvDB_Cover, false));
 
                         if (postersCount.ContainsKey(tvPoster.SeriesID))
                             postersCount[tvPoster.SeriesID] = postersCount[tvPoster.SeriesID] + 1;
@@ -541,9 +426,7 @@ namespace Shoko.Server
 
                     if (!fileExists && fanartAvailable < ServerSettings.Instance.TvDB.AutoFanartAmount)
                     {
-                        CommandRequest_DownloadImage cmd = new CommandRequest_DownloadImage(tvFanart.TvDB_ImageFanartID,
-                            ImageEntityType.TvDB_FanArt, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdImageDownload(tvFanart.TvDB_ImageFanartID,ImageEntityType.TvDB_FanArt, false));
 
                         if (fanartCount.ContainsKey(tvFanart.SeriesID))
                             fanartCount[tvFanart.SeriesID] = fanartCount[tvFanart.SeriesID] + 1;
@@ -585,10 +468,7 @@ namespace Shoko.Server
 
                     if (!fileExists && bannersAvailable < ServerSettings.Instance.TvDB.AutoWideBannersAmount)
                     {
-                        CommandRequest_DownloadImage cmd =
-                            new CommandRequest_DownloadImage(tvBanner.TvDB_ImageWideBannerID,
-                                ImageEntityType.TvDB_Banner, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdImageDownload(tvBanner.TvDB_ImageWideBannerID,ImageEntityType.TvDB_Banner, false));
 
                         if (fanartCount.ContainsKey(tvBanner.SeriesID))
                             fanartCount[tvBanner.SeriesID] = fanartCount[tvBanner.SeriesID] + 1;
@@ -606,9 +486,7 @@ namespace Shoko.Server
                 bool fileExists = File.Exists(tvEpisode.GetFullImagePath());
                 if (!fileExists)
                 {
-                    CommandRequest_DownloadImage cmd = new CommandRequest_DownloadImage(tvEpisode.TvDB_EpisodeID,
-                        ImageEntityType.TvDB_Episode, false);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdImageDownload(tvEpisode.TvDB_EpisodeID, ImageEntityType.TvDB_Episode, false));
                 }
             }
 
@@ -644,10 +522,8 @@ namespace Shoko.Server
 
                     if (!fileExists && postersAvailable < ServerSettings.Instance.MovieDb.AutoPostersAmount)
                     {
-                        CommandRequest_DownloadImage cmd = new CommandRequest_DownloadImage(
-                            moviePoster.MovieDB_PosterID,
-                            ImageEntityType.MovieDB_Poster, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdImageDownload(moviePoster.MovieDB_PosterID, ImageEntityType.MovieDB_Poster, false));
+
 
                         if (postersCount.ContainsKey(moviePoster.MovieId))
                             postersCount[moviePoster.MovieId] = postersCount[moviePoster.MovieId] + 1;
@@ -689,10 +565,7 @@ namespace Shoko.Server
 
                     if (!fileExists && fanartAvailable < ServerSettings.Instance.MovieDb.AutoFanartAmount)
                     {
-                        CommandRequest_DownloadImage cmd = new CommandRequest_DownloadImage(
-                            movieFanart.MovieDB_FanartID,
-                            ImageEntityType.MovieDB_FanArt, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdImageDownload(movieFanart.MovieDB_FanartID, ImageEntityType.MovieDB_FanArt, false));
 
                         if (fanartCount.ContainsKey(movieFanart.MovieId))
                             fanartCount[movieFanart.MovieId] = fanartCount[movieFanart.MovieId] + 1;
@@ -713,9 +586,7 @@ namespace Shoko.Server
                     var AnimeID = Repo.Instance.AniDB_Anime_Character.GetByCharID(chr.CharID)?.FirstOrDefault()
                                       ?.AnimeID ?? 0;
                     if (AnimeID == 0) continue;
-                    CommandRequest_DownloadAniDBImages cmd =
-                        new CommandRequest_DownloadAniDBImages(AnimeID, false);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdImageDownloadAllAniDb(AnimeID, false));
                 }
             }
 
@@ -732,9 +603,7 @@ namespace Shoko.Server
                     var AnimeID = Repo.Instance.AniDB_Anime_Character.GetByCharID(chr.CharID)?.FirstOrDefault()
                                       ?.AnimeID ?? 0;
                     if (AnimeID == 0) continue;
-                    CommandRequest_DownloadAniDBImages cmd =
-                        new CommandRequest_DownloadAniDBImages(AnimeID, false);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdImageDownloadAllAniDb(AnimeID, false));
                 }
             }
         }
@@ -742,9 +611,7 @@ namespace Shoko.Server
         public static void ValidateAllImages()
         {
             Analytics.PostEvent("Management", nameof(ValidateAllImages));
-
-            CommandRequest_ValidateAllImages cmd = new CommandRequest_ValidateAllImages();
-            cmd.Save();
+            CommandQueue.Queue.Instance.Add(new CmdServerValidateAllImages());
         }
 
         public static void RunImport_ScanTvDB()
@@ -779,8 +646,7 @@ namespace Shoko.Server
 
             foreach (SVR_AniDB_Anime anime in Repo.Instance.AniDB_Anime.GetAll())
             {
-                CommandRequest_GetAnimeHTTP cmd = new CommandRequest_GetAnimeHTTP(anime.AnimeID, true, false);
-                cmd.Save();
+                CommandQueue.Queue.Instance.Add(new CmdAniDBGetAnimeHTTP(anime.AnimeID, true, false));
             }
         }
 
@@ -813,7 +679,7 @@ namespace Shoko.Server
 
                 List<SVR_VideoLocal> videoLocalsAll = Repo.Instance.VideoLocal.GetAll().ToList();
                 // remove empty videolocals
-                Repo.Instance.VideoLocal.FindAndDelete(() => videoLocalsAll.Where(a => a.IsEmpty()).ToList());
+                Repo.Instance.VideoLocal.Delete(videoLocalsAll.Where(a => a.IsEmpty()));
 
                 // Remove duplicate videolocals
                 Dictionary<string, List<SVR_VideoLocal>> locals = videoLocalsAll
@@ -840,7 +706,7 @@ namespace Shoko.Server
                     toRemove.AddRange(froms);
                 }
 
-                Repo.Instance.VideoLocal.FindAndDelete(() => toRemove);
+                Repo.Instance.VideoLocal.Delete(toRemove);
 
                 // Remove files in invalid import folders
                 foreach (SVR_VideoLocal v in videoLocalsAll)
@@ -851,7 +717,7 @@ namespace Shoko.Server
                         foreach (SVR_VideoLocal_Place place in places)
                         {
                             if (!string.IsNullOrWhiteSpace(place?.FullServerPath)) continue;
-                            logger.Info("RemoveRecordsWithOrphanedImportFolder : {0}", v.FileName);
+                            logger.Info("RemoveRecordsWithOrphanedImportFolder : {0}", v.Info);
                             episodesToUpdate.UnionWith(v.GetAnimeEpisodes());
                             seriesToUpdate.UnionWith(v.GetAnimeEpisodes().Select(a => a.GetAnimeSeries())
                                 .DistinctBy(a => a.AnimeSeriesID));
@@ -869,13 +735,11 @@ namespace Shoko.Server
                     }
                     if (v.Places?.Count > 0) continue;
                     // delete video local record
-                    logger.Info("RemoveOrphanedVideoLocal : {0}", v.FileName);
+                    logger.Info("RemoveOrphanedVideoLocal : {0}", v.Info);
                     episodesToUpdate.UnionWith(v.GetAnimeEpisodes());
                     seriesToUpdate.UnionWith(v.GetAnimeEpisodes().Select(a => a.GetAnimeSeries())
                         .DistinctBy(a => a.AnimeSeriesID));
-                    CommandRequest_DeleteFileFromMyList cmdDel =
-                        new CommandRequest_DeleteFileFromMyList(v.MyListID);
-                    cmdDel.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdAniDBDeleteFileFromMyList(v.MyListID));
                     Repo.Instance.VideoLocal.Delete(v);
                 }
 
@@ -911,6 +775,7 @@ namespace Shoko.Server
 
         public static string DeleteCloudAccount(int cloudaccountID)
         {
+            
             SVR_CloudAccount cl = Repo.Instance.CloudAccount.GetByID(cloudaccountID);
             if (cl == null) return "Could not find Cloud Account ID: " + cloudaccountID;
             foreach (SVR_ImportFolder f in Repo.Instance.ImportFolder.GetByCloudId(cl.CloudID))
@@ -955,17 +820,15 @@ namespace Shoko.Server
                     {
                         Repo.Instance.VideoLocal_Place.Delete(vid);
                         Repo.Instance.VideoLocal.Delete(v);
-                        CommandRequest_DeleteFileFromMyList cmdDel =
-                            new CommandRequest_DeleteFileFromMyList(v.MyListID);
-                        cmdDel.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdAniDBDeleteFileFromMyList(v.MyListID));
                     }
                     else
                         Repo.Instance.VideoLocal_Place.Delete(vid);
                 }
 
                 // delete any duplicate file records which reference this folder
-                Repo.Instance.DuplicateFile.Delete(Repo.Instance.DuplicateFile.GetByImportFolder1(importFolderID));
-                Repo.Instance.DuplicateFile.Delete(Repo.Instance.DuplicateFile.GetByImportFolder2(importFolderID));
+                Repo.Instance.DuplicateFile.FindAndDelete(()=>Repo.Instance.DuplicateFile.GetByImportFolder1(importFolderID));
+                Repo.Instance.DuplicateFile.FindAndDelete(()=>Repo.Instance.DuplicateFile.GetByImportFolder2(importFolderID));
 
                 // delete the import folder
                 Repo.Instance.ImportFolder.Delete(importFolderID);
@@ -1016,7 +879,7 @@ namespace Shoko.Server
 
         public static int UpdateAniDBFileData(bool missingInfo, bool outOfDate, bool countOnly)
         {
-            List<int> vidsToUpdate = new List<int>();
+            List<SVR_VideoLocal> vidsToUpdate = new List<SVR_VideoLocal>();
             try
             {
                 if (missingInfo)
@@ -1025,15 +888,15 @@ namespace Shoko.Server
 
                     foreach (SVR_VideoLocal vid in vids)
                     {
-                        if (!vidsToUpdate.Contains(vid.VideoLocalID))
-                            vidsToUpdate.Add(vid.VideoLocalID);
+                        if (!vidsToUpdate.Any(a=>a.VideoLocalID==vid.VideoLocalID))
+                            vidsToUpdate.Add(vid);
                     }
 
                     vids = Repo.Instance.VideoLocal.GetWithMissingChapters();
                     foreach (SVR_VideoLocal vid in vids)
                     {
-                        if (!vidsToUpdate.Contains(vid.VideoLocalID))
-                            vidsToUpdate.Add(vid.VideoLocalID);
+                        if (!vidsToUpdate.Any(a => a.VideoLocalID == vid.VideoLocalID))
+                            vidsToUpdate.Add(vid);
                     }
                 }
 
@@ -1043,18 +906,14 @@ namespace Shoko.Server
 
                     foreach (SVR_VideoLocal vid in vids)
                     {
-                        if (!vidsToUpdate.Contains(vid.VideoLocalID))
-                            vidsToUpdate.Add(vid.VideoLocalID);
+                        if (!vidsToUpdate.Any(a => a.VideoLocalID == vid.VideoLocalID))
+                            vidsToUpdate.Add(vid);
                     }
                 }
 
                 if (!countOnly)
                 {
-                    foreach (int id in vidsToUpdate)
-                    {
-                        CommandRequest_GetFile cmd = new CommandRequest_GetFile(id, true);
-                        cmd.Save();
-                    }
+                    CommandQueue.Queue.Instance.AddRange(vidsToUpdate.Select(a=>new CmdAniDBGetFile(a, true)));
                 }
             }
             catch (Exception ex)
@@ -1067,12 +926,22 @@ namespace Shoko.Server
 
         public static void CheckForDayFilters()
         {
-            ScheduledUpdate sched =
-                Repo.Instance.ScheduledUpdate.GetByUpdateType((int) ScheduledUpdateType.DayFiltersUpdate);
-            if (sched != null)
+            
+
+
+            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => Repo.Instance.ScheduledUpdate.GetByUpdateType((int)ScheduledUpdateType.DayFiltersUpdate), () => new ScheduledUpdate
             {
-                if (DateTime.Now.Day == sched.LastUpdate.Day)
-                    return;
+                UpdateType = (int)ScheduledUpdateType.DayFiltersUpdate,
+                UpdateDetails = string.Empty
+            }))
+            {
+                if (upd.IsUpdate())
+                {
+                    if (DateTime.Now.Day == upd.Entity.LastUpdate.Day)
+                        return;
+                }
+                upd.Entity.LastUpdate = DateTime.Now;
+                upd.Commit();
             }
             //Get GroupFiters that change daily
 
@@ -1091,42 +960,40 @@ namespace Shoko.Server
                 .ToList();
 
             Repo.Instance.GroupFilter.BatchAction(evalfilters, evalfilters.Count, (g, _) => g.CalculateGroupsAndSeries());
-
-            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => sched, () =>
-            {
-                return new ScheduledUpdate
-                {
-                    UpdateType = (int)ScheduledUpdateType.DayFiltersUpdate,
-                    UpdateDetails = string.Empty
-                };
-            }))
-            {
-                upd.Entity.LastUpdate = DateTime.Now;
-                upd.Commit();
-            }
         }
 
         public static void CheckForTvDBUpdates(bool forceRefresh)
         {
             if (ServerSettings.Instance.TvDB.UpdateFrequency == ScheduledUpdateFrequency.Never && !forceRefresh) return;
             int freqHours = Utils.GetScheduledHours(ServerSettings.Instance.TvDB.UpdateFrequency);
-
-            // update tvdb info every 12 hours
-
-            ScheduledUpdate sched = Repo.Instance.ScheduledUpdate.GetByUpdateType((int) ScheduledUpdateType.TvDBInfo);
-            if (sched != null)
-            {
-                // if we have run this in the last 12 hours and are not forcing it, then exit
-                TimeSpan tsLastRun = DateTime.Now - sched.LastUpdate;
-                if (tsLastRun.TotalHours < freqHours)
-                {
-                    if (!forceRefresh) return;
-                }
-            }
-
             List<int> tvDBIDs = new List<int>();
             bool tvDBOnline = false;
             string serverTime = TvDBApiHelper.IncrementalTvDBUpdate(ref tvDBIDs, ref tvDBOnline);
+
+            // update tvdb info every 12 hours
+
+
+
+
+            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => Repo.Instance.ScheduledUpdate.GetByUpdateType((int)ScheduledUpdateType.TvDBInfo), () => new ScheduledUpdate
+            {
+                UpdateType = (int)ScheduledUpdateType.TvDBInfo
+            }))
+            {
+                if (upd.IsUpdate())
+                {
+                    // if we have run this in the last 12 hours and are not forcing it, then exit
+                    TimeSpan tsLastRun = DateTime.Now - upd.Entity.LastUpdate;
+                    if (tsLastRun.TotalHours < freqHours)
+                    {
+                        if (!forceRefresh) return;
+                    }
+                }
+                upd.Entity.LastUpdate = DateTime.Now;
+                upd.Entity.UpdateDetails = serverTime;
+                upd.Commit();
+            }
+
 
             if (tvDBOnline)
             {
@@ -1134,24 +1001,8 @@ namespace Shoko.Server
                 {
                     // download and update series info, episode info and episode images
                     // will also download fanart, posters and wide banners
-                    CommandRequest_TvDBUpdateSeries cmdSeriesEps =
-                        new CommandRequest_TvDBUpdateSeries(tvid,
-                            true);
-                    cmdSeriesEps.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdTvDBUpdateSeries(tvid, true));
                 }
-            }
-
-            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => sched, () =>
-            {
-                return new ScheduledUpdate
-                {
-                    UpdateType = (int)ScheduledUpdateType.TvDBInfo
-                };
-            }))
-            {
-                upd.Entity.LastUpdate = DateTime.Now;
-                upd.Entity.UpdateDetails = serverTime;
-                upd.Commit();
             }
 
             TvDBApiHelper.ScanForMatches();
@@ -1178,8 +1029,7 @@ namespace Shoko.Server
                 }
             }
 
-            CommandRequest_GetCalendar cmd = new CommandRequest_GetCalendar(forceRefresh);
-            cmd.Save();
+            CommandQueue.Queue.Instance.Add(new CmdAniDBGetCalendar(forceRefresh));
         }
 
         public static void SendUserInfoUpdate(bool forceRefresh)
@@ -1187,34 +1037,26 @@ namespace Shoko.Server
             // update the anonymous user info every 12 hours
             // we will always assume that an anime was downloaded via http first
 
-            ScheduledUpdate sched =
-                Repo.Instance.ScheduledUpdate.GetByUpdateType((int) ScheduledUpdateType.AzureUserInfo);
-            if (sched != null)
+            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => Repo.Instance.ScheduledUpdate.GetByUpdateType((int)ScheduledUpdateType.AzureUserInfo), () => new ScheduledUpdate
             {
-                // if we have run this in the last 6 hours and are not forcing it, then exit
-                TimeSpan tsLastRun = DateTime.Now - sched.LastUpdate;
-                if (tsLastRun.TotalHours < 6)
-                {
-                    if (!forceRefresh) return;
-                }
-            }
-
-            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => sched, () =>
-            {
-                return new ScheduledUpdate
-                {
-                    UpdateType = (int)ScheduledUpdateType.AzureUserInfo,
-                    UpdateDetails = string.Empty
-                };
+                UpdateType = (int)ScheduledUpdateType.AzureUserInfo,
+                UpdateDetails = string.Empty
             }))
             {
+                if (upd.IsUpdate())
+                {
+                    // if we have run this in the last 6 hours and are not forcing it, then exit
+                    TimeSpan tsLastRun = DateTime.Now - upd.Entity.LastUpdate;
+                    if (tsLastRun.TotalHours < 6)
+                    {
+                        if (!forceRefresh) return;
+                    }
+                }
                 upd.Entity.LastUpdate = DateTime.Now;
                 upd.Commit();
             }
 
-            CommandRequest_Azure_SendUserInfo cmd =
-                new CommandRequest_Azure_SendUserInfo(ServerSettings.Instance.AniDb.Username);
-            cmd.Save();
+           // CommandQueue.Queue.Instance.Add(new CmdWebCacheSendUserInfo(ServerSettings.Instance.AniDb.Username));
         }
 
         public static void CheckForAnimeUpdate(bool forceRefresh)
@@ -1235,8 +1077,7 @@ namespace Shoko.Server
                 }
             }
 
-            CommandRequest_GetUpdated cmd = new CommandRequest_GetUpdated(true);
-            cmd.Save();
+            CommandQueue.Queue.Instance.Add(new CmdAniDBGetUpdated(true));
         }
 
         public static void CheckForMyListStatsUpdate(bool forceRefresh)
@@ -1258,8 +1099,7 @@ namespace Shoko.Server
                 }
             }
 
-            CommandRequest_UpdateMyListStats cmd = new CommandRequest_UpdateMyListStats(forceRefresh);
-            cmd.Save();
+            CommandQueue.Queue.Instance.Add(new CmdAniDBUpdateMyListStats(forceRefresh));
         }
 
         public static void CheckForMyListSyncUpdate(bool forceRefresh)
@@ -1282,8 +1122,7 @@ namespace Shoko.Server
                 }
             }
 
-            CommandRequest_SyncMyList cmd = new CommandRequest_SyncMyList(forceRefresh);
-            cmd.Save();
+            CommandQueue.Queue.Instance.Add(new CmdAniDBSyncMyList(forceRefresh));
         }
 
         public static void CheckForTraktSyncUpdate(bool forceRefresh)
@@ -1308,8 +1147,7 @@ namespace Shoko.Server
 
             if (ServerSettings.Instance.TraktTv.Enabled && !string.IsNullOrEmpty(ServerSettings.Instance.TraktTv.AuthToken))
             {
-                CommandRequest_TraktSyncCollection cmd = new CommandRequest_TraktSyncCollection(false);
-                cmd.Save();
+                CommandQueue.Queue.Instance.Add(new CmdTraktSyncCollection(false));
             }
         }
 
@@ -1332,8 +1170,7 @@ namespace Shoko.Server
                 }
             }
 
-            CommandRequest_TraktUpdateAllSeries cmd = new CommandRequest_TraktUpdateAllSeries(false);
-            cmd.Save();
+            CommandQueue.Queue.Instance.Add(new CmdTraktUpdateAllSeries(false));
         }
 
         public static void CheckForTraktTokenUpdate(bool forceRefresh)
@@ -1344,33 +1181,28 @@ namespace Shoko.Server
                 // by updating the Trakt token regularly, the user won't need to authorize again
                 int freqHours = 24; // we need to update this daily
 
-                ScheduledUpdate sched =
-                    Repo.Instance.ScheduledUpdate.GetByUpdateType((int) ScheduledUpdateType.TraktToken);
-                if (sched != null)
-                {
-                    // if we have run this in the last xxx hours and are not forcing it, then exit
-                    TimeSpan tsLastRun = DateTime.Now - sched.LastUpdate;
-                    logger.Trace("Last Trakt Token Update: {0} minutes ago", tsLastRun.TotalMinutes);
-                    if (tsLastRun.TotalHours < freqHours)
-                    {
-                        if (!forceRefresh) return;
-                    }
-                }
 
-                TraktTVHelper.RefreshAuthToken();
-
-                using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => sched, () =>
+                using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => Repo.Instance.ScheduledUpdate.GetByUpdateType((int)ScheduledUpdateType.TraktToken), () => new ScheduledUpdate
                 {
-                    return new ScheduledUpdate
-                    {
-                        UpdateType = (int)ScheduledUpdateType.TraktToken,
-                        UpdateDetails = string.Empty
-                    };
+                    UpdateType = (int)ScheduledUpdateType.TraktToken,
+                    UpdateDetails = string.Empty
                 }))
                 {
+                    if (upd.IsUpdate())
+                    {
+                        // if we have run this in the last xxx hours and are not forcing it, then exit
+                        TimeSpan tsLastRun = DateTime.Now - upd.Entity.LastUpdate;
+                        logger.Trace("Last Trakt Token Update: {0} minutes ago", tsLastRun.TotalMinutes);
+                        if (tsLastRun.TotalHours < freqHours)
+                        {
+                            if (!forceRefresh) return;
+                        }
+                    }
                     upd.Entity.LastUpdate = DateTime.Now;
                     upd.Commit();
                 }
+
+                TraktTVHelper.RefreshAuthToken();
             }
             catch (Exception ex)
             {
@@ -1385,18 +1217,24 @@ namespace Shoko.Server
 
             // check for any updated anime info every 12 hours
 
-            ScheduledUpdate sched =
-                Repo.Instance.ScheduledUpdate.GetByUpdateType((int) ScheduledUpdateType.AniDBFileUpdates);
-            if (sched != null)
+            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => Repo.Instance.ScheduledUpdate.GetByUpdateType((int)ScheduledUpdateType.AniDBFileUpdates), () => new ScheduledUpdate
             {
-                // if we have run this in the last 12 hours and are not forcing it, then exit
-                TimeSpan tsLastRun = DateTime.Now - sched.LastUpdate;
-                if (tsLastRun.TotalHours < freqHours && !forceRefresh)
+                UpdateType = (int)ScheduledUpdateType.AniDBFileUpdates,
+                UpdateDetails = string.Empty
+            }))
+            {
+                if (upd.IsUpdate())
                 {
-                    return;
+                    // if we have run this in the last 12 hours and are not forcing it, then exit
+                    TimeSpan tsLastRun = DateTime.Now - upd.Entity.LastUpdate;
+                    if (tsLastRun.TotalHours < freqHours && !forceRefresh)
+                    {
+                        return;
+                    }
                 }
+                upd.Entity.LastUpdate = DateTime.Now;
+                upd.Commit();
             }
-
             UpdateAniDBFileData(true, false, false);
 
             // files which have been hashed, but don't have an associated episode
@@ -1404,56 +1242,16 @@ namespace Shoko.Server
 
             foreach (SVR_VideoLocal vl in filesWithoutEpisode)
             {
-                CommandRequest_ProcessFile cmd = new CommandRequest_ProcessFile(vl.VideoLocalID, true);
-                cmd.Save();
+                CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(vl.VideoLocalID, true));
             }
 
             // now check for any files which have been manually linked and are less than 30 days old
 
-            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => sched, () =>
-            {
-                return new ScheduledUpdate
-                {
-                    UpdateType = (int)ScheduledUpdateType.AniDBFileUpdates,
-                    UpdateDetails = string.Empty
-                };
-            }))
-            {
-                upd.Entity.LastUpdate = DateTime.Now;
-                upd.Commit();
-            }
         }
 
         public static void CheckForPreviouslyIgnored()
         {
-            try
-            {
-                IReadOnlyList<SVR_VideoLocal> filesAll = Repo.Instance.VideoLocal.GetAll();
-                IReadOnlyList<SVR_VideoLocal> filesIgnored = Repo.Instance.VideoLocal.GetIgnoredVideos();
-
-                foreach (SVR_VideoLocal vl in filesAll)
-                {
-                    if (vl.IsIgnored == 0)
-                    {
-                        // Check if we have this file marked as previously ignored, matches only if it has the same hash
-                        List<SVR_VideoLocal> resultVideoLocalsIgnored =
-                            filesIgnored.Where(s => s.Hash == vl.Hash).ToList();
-
-                        if (resultVideoLocalsIgnored.Any())
-                        {
-                            using (var upd = Repo.Instance.VideoLocal.BeginAddOrUpdate(() => vl))
-                            {
-                                upd.Entity.IsIgnored = 1;
-                                upd.Commit(false);
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, string.Format("Error in CheckForPreviouslyIgnored: {0}", ex));
-            }
+            //This cannot happens anymore, or we have a corrupt videolocal
         }
 
         public static void UpdateAniDBTitles()
@@ -1466,29 +1264,22 @@ namespace Shoko.Server
 
             // check for any updated anime info every 100 hours
 
-            ScheduledUpdate sched = Repo.Instance.ScheduledUpdate.GetByUpdateType((int) ScheduledUpdateType.AniDBTitles);
-            if (sched != null)
+            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => Repo.Instance.ScheduledUpdate.GetByUpdateType((int)ScheduledUpdateType.AniDBTitles), () => new ScheduledUpdate
             {
-                // if we have run this in the last 100 hours and are not forcing it, then exit
-                TimeSpan tsLastRun = DateTime.Now - sched.LastUpdate;
-                if (tsLastRun.TotalHours < freqHours) return;
-            }
-
-            using (var upd = Repo.Instance.ScheduledUpdate.BeginAddOrUpdate(() => sched, () =>
-            {
-                return new ScheduledUpdate
-                {
-                    UpdateType = (int)ScheduledUpdateType.AniDBTitles,
-                    UpdateDetails = string.Empty
-                };
+                UpdateType = (int)ScheduledUpdateType.AniDBTitles,
+                UpdateDetails = string.Empty
             }))
             {
+                if (upd.IsUpdate())
+                {
+                    // if we have run this in the last 100 hours and are not forcing it, then exit
+                    TimeSpan tsLastRun = DateTime.Now - upd.Entity.LastUpdate;
+                    if (tsLastRun.TotalHours < freqHours) return;
+                }
                 upd.Entity.LastUpdate = DateTime.Now;
                 upd.Commit();
             }
-
-            CommandRequest_GetAniDBTitles cmd = new CommandRequest_GetAniDBTitles();
-            cmd.Save();
+            //CommandQueue.Queue.Instance.Add(new CmdAniDBGetTitles());
         }
     }
 }

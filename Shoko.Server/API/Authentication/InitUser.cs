@@ -21,8 +21,6 @@ namespace Shoko.Server.API.Authentication
             
         }
         
-        //[NotMapped] public IEnumerable<string> Claims { get; set; }
-
         [NotMapped] string IIdentity.AuthenticationType => "API";
 
         [NotMapped] bool IIdentity.IsAuthenticated => true;

@@ -3,30 +3,32 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Xml;
-using AniDBAPI;
 using NLog;
-using Shoko.Models.Azure;
 using Shoko.Models.Enums;
+using Shoko.Models.MediaInfo;
 using Shoko.Models.Metro;
 using Shoko.Models.PlexAndKodi;
 using Shoko.Models.Server;
+using Shoko.Models.Server.Media;
 using Shoko.Models.TvDB;
-using Shoko.Server.AniDB_API.Raws;
+using Shoko.Models.WebCache;
+using Shoko.Server.Compression.LZ4;
 using Shoko.Server.Models;
-using Shoko.Server.LZ4;
+using Shoko.Server.Providers.AniDB.Raws;
 using Shoko.Server.Providers.MovieDB;
 using Shoko.Server.Providers.TraktTV.Contracts;
 using Shoko.Server.Repositories;
+using Shoko.Server.Settings;
 
 namespace Shoko.Server.Extensions
 {
     public static class ModelProviders
     {
         private static Logger logger = LogManager.GetCurrentClassLogger();
-
-        public static Azure_CrossRef_AniDB_Other_Request ToRequest(this CrossRef_AniDB_Other c)
+        /*
+        public static WebCache_CrossRef_AniDB_Other_Request ToRequest(this CrossRef_AniDB_Other c)
         {
-            return new Azure_CrossRef_AniDB_Other_Request
+            return new WebCache_CrossRef_AniDB_Other_Request
             {
                 CrossRef_AniDB_OtherID = c.CrossRef_AniDB_OtherID,
                 AnimeID = c.AnimeID,
@@ -35,10 +37,10 @@ namespace Shoko.Server.Extensions
                 CrossRefType = c.CrossRefType,
             };
         }
-
-        public static Azure_FileHash_Request ToHashRequest(this AniDB_File anifile)
+        */
+        public static WebCache_FileHash ToHashRequest(this AniDB_File anifile)
         {
-            Azure_FileHash_Request r = new Azure_FileHash_Request
+            WebCache_FileHash r = new WebCache_FileHash
             {
                 ED2K = anifile.Hash,
                 CRC32 = anifile.CRC,
@@ -46,17 +48,12 @@ namespace Shoko.Server.Extensions
                 SHA1 = anifile.SHA1,
                 FileSize = anifile.FileSize
             };
-            r.Username = ServerSettings.Instance.AniDb.Username;
-            if (ServerSettings.Instance.WebCache.Anonymous)
-                r.Username = Constants.AnonWebCacheUsername;
-            r.AuthGUID = string.IsNullOrEmpty(ServerSettings.Instance.WebCache.AuthKey) ? string.Empty : ServerSettings.Instance.WebCache.AuthKey;
-
             return r;
         }
-
-        public static Azure_FileHash_Request ToHashRequest(this SVR_VideoLocal vl)
+        
+        public static WebCache_FileHash ToHashRequest(this SVR_VideoLocal vl)
         {
-            Azure_FileHash_Request r = new Azure_FileHash_Request
+            WebCache_FileHash r = new WebCache_FileHash
             {
                 ED2K = vl.Hash,
                 CRC32 = vl.CRC32,
@@ -64,85 +61,36 @@ namespace Shoko.Server.Extensions
                 SHA1 = vl.SHA1,
                 FileSize = vl.FileSize
             };
-            r.Username = ServerSettings.Instance.AniDb.Username;
-            if (ServerSettings.Instance.WebCache.Anonymous)
-                r.Username = Constants.AnonWebCacheUsername;
-            r.AuthGUID = string.IsNullOrEmpty(ServerSettings.Instance.WebCache.AuthKey) ? string.Empty : ServerSettings.Instance.WebCache.AuthKey;
-
             return r;
         }
 
-        public static Media ToMedia(this Azure_Media m)
+
+
+        public static WebCache_Media ToMediaRequest(this SVR_VideoLocal v)
         {
-            int size = (m.MediaInfo[0] << 24) | (m.MediaInfo[1] << 16) | (m.MediaInfo[2] << 8) | m.MediaInfo[3];
-            byte[] data = new byte[m.MediaInfo.Length - 4];
-            Array.Copy(m.MediaInfo, 4, data, 0, data.Length);
-            return CompressionHelper.DeserializeObject<Media>(data, size);
+            if (v.MediaInfo == null)
+                return null;
+            WebCache_Media m = new WebCache_Media {ED2K = v.ED2KHash};
+            m.MediaInfo = v.MediaInfo.MediaInfo;
+            m.Version = v.MediaInfo.Version;
+            return m;
+
         }
 
-        public static Azure_Media_Request ToMediaRequest(this SVR_VideoLocal v)
+        public static WebCache_Media ToMediaRequest(this MediaStoreInfo m, string ed2k)
         {
-            Azure_Media_Request r = new Azure_Media_Request
-            {
-                ED2K = v.ED2KHash
-            };
-            //Cleanup any File subtitles from media information.
-            Media m = (Media) v.Media.Clone();
-            if (m.Parts != null && m.Parts.Count > 0)
-            {
-                foreach (Part p in m.Parts)
-                {
-                    if (p.Streams != null)
-                    {
-                        List<Stream> streams = p.Streams
-                            .Where(a => a.StreamType == 3 && !string.IsNullOrEmpty(a.File))
-                            .ToList();
-                        if (streams.Count > 0)
-                            streams.ForEach(a => p.Streams.Remove(a));
-                    }
-                }
-            }
-            //Cleanup the VideoLocal id
-            m.Id = 0;
-            byte[] data = CompressionHelper.SerializeObject(m, out int outsize);
-            r.ED2K = v.ED2KHash;
-            r.MediaInfo = new byte[data.Length + 4];
-            r.MediaInfo[0] = (byte)(outsize >> 24);
-            r.MediaInfo[1] = (byte)((outsize >> 16) & 0xFF);
-            r.MediaInfo[2] = (byte)((outsize >> 8) & 0xFF);
-            r.MediaInfo[3] = (byte)(outsize & 0xFF);
-            Array.Copy(data, 0, r.MediaInfo, 4, data.Length);
-            r.Version = SVR_VideoLocal.MEDIA_VERSION;
-            r.Username = ServerSettings.Instance.AniDb.Username;
-            if (ServerSettings.Instance.WebCache.Anonymous)
-                r.Username = Constants.AnonWebCacheUsername;
-            r.AuthGUID = string.IsNullOrEmpty(ServerSettings.Instance.WebCache.AuthKey) ? string.Empty : ServerSettings.Instance.WebCache.AuthKey;
+            if (m == null)
+                return null;
+            WebCache_Media n = new WebCache_Media { ED2K = ed2k };
+            n.MediaInfo = m.MediaInfo;
+            n.Version = m.Version;
+            return n;
 
-            return r;
         }
-
-        public static Azure_Media_Request ToMediaRequest(this Media m, string ed2k)
+        /*
+        public static WebCache_CrossRef_AniDB_Trakt_Request ToRequest(this CrossRef_AniDB_TraktV2 xref, string animeName)
         {
-            Azure_Media_Request r = new Azure_Media_Request();
-            byte[] data = CompressionHelper.SerializeObject(m, out int outsize);
-            r.ED2K = ed2k;
-            r.MediaInfo = new byte[data.Length + 4];
-            r.MediaInfo[0] = (byte)(outsize >> 24);
-            r.MediaInfo[1] = (byte)((outsize >> 16) & 0xFF);
-            r.MediaInfo[2] = (byte)((outsize >> 8) & 0xFF);
-            r.MediaInfo[3] = (byte)(outsize & 0xFF);
-            Array.Copy(data, 0, r.MediaInfo, 4, data.Length);
-            r.Version = SVR_VideoLocal.MEDIA_VERSION;
-            r.Username = ServerSettings.Instance.AniDb.Username;
-            if (ServerSettings.Instance.WebCache.Anonymous)
-                r.Username = Constants.AnonWebCacheUsername;
-            r.AuthGUID = string.IsNullOrEmpty(ServerSettings.Instance.WebCache.AuthKey) ? string.Empty : ServerSettings.Instance.WebCache.AuthKey;
-            return r;
-        }
-
-        public static Azure_CrossRef_AniDB_Trakt_Request ToRequest(this CrossRef_AniDB_TraktV2 xref, string animeName)
-        {
-            Azure_CrossRef_AniDB_Trakt_Request r = new Azure_CrossRef_AniDB_Trakt_Request
+            WebCache_CrossRef_AniDB_Trakt_Request r = new WebCache_CrossRef_AniDB_Trakt_Request
             {
                 AnimeID = xref.AnimeID,
                 AnimeName = animeName,
@@ -163,9 +111,9 @@ namespace Shoko.Server.Extensions
             return r;
         }
 
-        public static Azure_CrossRef_AniDB_TvDB_Request ToRequest(this CrossRef_AniDB_TvDBV2 xref, string animeName)
+        public static WebCache_CrossRef_AniDB_TvDB_Request ToRequest(this CrossRef_AniDB_TvDBV2 xref, string animeName)
         {
-            Azure_CrossRef_AniDB_TvDB_Request r = new Azure_CrossRef_AniDB_TvDB_Request
+            WebCache_CrossRef_AniDB_TvDB_Request r = new WebCache_CrossRef_AniDB_TvDB_Request
             {
                 AnimeID = xref.AnimeID,
                 AnimeName = animeName,
@@ -184,9 +132,9 @@ namespace Shoko.Server.Extensions
             return r;
         }
 
-        public static Azure_CrossRef_File_Episode_Request ToRequest(this CrossRef_File_Episode xref)
+        public static WebCache_CrossRef_File_Episode_Request ToRequest(this CrossRef_File_Episode xref)
         {
-            Azure_CrossRef_File_Episode_Request r = new Azure_CrossRef_File_Episode_Request
+            WebCache_CrossRef_File_Episode_Request r = new WebCache_CrossRef_File_Episode_Request
             {
                 Hash = xref.Hash,
                 AnimeID = xref.AnimeID,
@@ -200,7 +148,7 @@ namespace Shoko.Server.Extensions
                 r.Username = Constants.AnonWebCacheUsername;
             return r;
         }
-
+        */
         public static FileNameHash ToFileNameHash(this CrossRef_File_Episode cfe)
         {
             return new FileNameHash
@@ -653,7 +601,7 @@ namespace Shoko.Server.Extensions
                 CharType = charRel.CharType,
 
                 ImageType = (int)ImageEntityType.AniDB_Character,
-                ImageID = character.AniDB_CharacterID
+                ImageID = character.CharID
             };
             AniDB_Seiyuu seiyuu = character.GetSeiyuu();
             if (seiyuu != null)
@@ -661,35 +609,13 @@ namespace Shoko.Server.Extensions
                 contract.SeiyuuID = seiyuu.SeiyuuID;
                 contract.SeiyuuName = seiyuu.SeiyuuName;
                 contract.SeiyuuImageType = (int) ImageEntityType.AniDB_Creator;
-                contract.SeiyuuImageID = seiyuu.AniDB_SeiyuuID;
+                contract.SeiyuuImageID = seiyuu.SeiyuuID;
             }
 
             return contract;
         }
 
-        public static Azure_AnimeCharacter ToContractAzure(this AniDB_Character character,
-            AniDB_Anime_Character charRel)
-        {
-            Azure_AnimeCharacter contract = new Azure_AnimeCharacter
-            {
-                CharID = character.CharID,
-                CharName = character.CharName,
-                CharKanjiName = character.CharKanjiName,
-                CharDescription = character.CharDescription,
-                CharType = charRel.CharType,
-                CharImageURL = string.Format(Constants.URLS.AniDB_Images, character.PicName)
-            };
-            AniDB_Seiyuu seiyuu = character.GetSeiyuu();
-            if (seiyuu != null)
-            {
-                contract.SeiyuuID = seiyuu.SeiyuuID;
-                contract.SeiyuuName = seiyuu.SeiyuuName;
-                contract.SeiyuuImageURL = string.Format(Constants.URLS.AniDB_Images, seiyuu.PicName);
-            }
-
-            return contract;
-        }
-
+   
         public static void Populate_RA(this AniDB_Episode episode, Raw_AniDB_Episode epInfo)
         {
             episode.AirDate = epInfo.AirDate;
@@ -801,7 +727,7 @@ namespace Shoko.Server.Extensions
         public static void PopulateManually_RA(this CrossRef_File_Episode cross, SVR_VideoLocal vid, SVR_AnimeEpisode ep)
         {
             cross.Hash = vid.ED2KHash;
-            cross.FileName = vid.FileName;
+            cross.FileName = vid.Info;
             cross.FileSize = vid.FileSize;
             cross.CrossRefSource = (int) CrossRefSource.User;
             cross.AnimeID = ep.GetAnimeSeries().AniDB_ID;
@@ -844,15 +770,6 @@ namespace Shoko.Server.Extensions
             animeep_ra.DateTimeCreated = DateTime.Now;
         }
 
-        public static CrossRef_AniDB_TvDBV2 ToV2Model(this CrossRef_AniDB_TvDB xref)
-        {
-            return new CrossRef_AniDB_TvDBV2
-            {
-                AnimeID = xref.AniDBID,
-                CrossRefSource = (int) xref.CrossRefSource,
-                TvDBID = xref.TvDBID
-            };
-        }
 
         public static (int season, int episodeNumber) GetNextEpisode(this TvDB_Episode ep)
         {
@@ -889,6 +806,40 @@ namespace Shoko.Server.Extensions
                 number += Repo.Instance.TvDB_Episode.GetNumberOfEpisodesForSeason(ep.SeriesID, ep.SeasonNumber);
 
             return number;
+        }
+
+
+        public static List<WebCache_CrossRef_AniDB_Provider> BestProvider(this List<WebCache_CrossRef_AniDB_Provider> list, bool prefer_user=false)
+        {
+            if (list == null || list.Count == 0)
+                return new List<WebCache_CrossRef_AniDB_Provider>();
+            if (prefer_user)
+            {
+                List<WebCache_CrossRef_AniDB_Provider> bst = list.Where(a => a.Type == WebCache_ReliabilityType.User).ToList();
+                if (bst != null)
+                    return bst;
+            }
+            WebCache_CrossRef_AniDB_Provider best = list.FirstOrDefault(a => a.Type == WebCache_ReliabilityType.AdminVerified);
+            if (best==null)
+                best = list.FirstOrDefault(a => a.Type == WebCache_ReliabilityType.ModeratorVerified);
+            if (best == null)
+                best = list.FirstOrDefault(a => a.Type == WebCache_ReliabilityType.User);
+            if (best == null)
+                best = list.OrderByDescending(a => a.PopularityCount).First();
+            return list.Where(a => a.AniDBUserId == best.AniDBUserId).ToList();
+
+        }
+
+        public static WebCache_CrossRef_AniDB_Provider ToWebCache(this  SVR_CrossRef_AniDB_Provider pr)
+        {
+            WebCache_CrossRef_AniDB_Provider w=new WebCache_CrossRef_AniDB_Provider();
+            w.CrossRefID = pr.CrossRefID;
+            w.AnimeID = pr.AnimeID;
+            w.CrossRefSource = pr.CrossRefSource;
+            w.CrossRefType = pr.CrossRefType;
+            w.EpisodesOverrideData = pr.EpisodesOverrideData;
+            w.IsAdditive = pr.IsAdditive;
+            return w;
         }
     }
 }

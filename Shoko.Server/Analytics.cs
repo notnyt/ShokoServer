@@ -5,9 +5,11 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
-using Shoko.Server.Extensions;
 using NLog;
 using System.Globalization;
+using Shoko.Server.Settings;
+using Utils=Shoko.Server.Utilities.Utils;
+using Shoko.Server.Extensions;
 
 namespace Shoko.Server
 {

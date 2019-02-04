@@ -6,6 +6,7 @@ using Shoko.Models.Client;
 using Shoko.Models.Server;
 using Shoko.Server.API.Annotations;
 using Shoko.Server.API.v2.Models.core;
+using Shoko.Server.Import;
 
 namespace Shoko.Server.API.v3
 {

@@ -20,10 +20,15 @@ using Shoko.Models.Server;
 using Shoko.Server.API.v2.Models;
 using Shoko.Server.API.v2.Models.common;
 using Shoko.Server.API.v2.Models.core;
-using Shoko.Server.Commands;
+using Shoko.Server.CommandQueue.Commands;
+using Shoko.Server.CommandQueue.Commands.AniDB;
+using Shoko.Server.CommandQueue.Commands.Hash;
+using Shoko.Server.CommandQueue.Commands.Server;
 using Shoko.Server.Extensions;
+using Shoko.Server.Import;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories;
+using Shoko.Server.Utilities;
 
 namespace Shoko.Server.API.v2.Modules
 {
@@ -233,9 +238,7 @@ namespace Shoko.Server.API.v2.Modules
                 if (vid == null) return APIStatus.NotFound();
                 if (string.IsNullOrEmpty(vid.Hash))
                     return APIStatus.BadRequest("Could not Update a cloud file without hash, hash it locally first");
-                CommandRequest_ProcessFile cmd =
-                    new CommandRequest_ProcessFile(vid.VideoLocalID, true);
-                cmd.Save();
+                CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(vid.VideoLocalID, true));
                 return APIStatus.OK();
             }
             catch (Exception ex)
@@ -258,8 +261,7 @@ namespace Shoko.Server.API.v2.Modules
 
                 foreach (SVR_VideoLocal vl in filesWithoutEpisode.Where(a => !string.IsNullOrEmpty(a.Hash)))
                 {
-                    CommandRequest_ProcessFile cmd = new CommandRequest_ProcessFile(vl.VideoLocalID, true);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(vl.VideoLocalID, true));
                 }
                 return APIStatus.OK();
             }
@@ -283,8 +285,7 @@ namespace Shoko.Server.API.v2.Modules
 
                 foreach (SVR_VideoLocal vl in filesWithoutEpisode.Where(a => !string.IsNullOrEmpty(a.Hash)))
                 {
-                    CommandRequest_ProcessFile cmd = new CommandRequest_ProcessFile(vl.VideoLocalID, true);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdServerProcessFile(vl.VideoLocalID, true));
                 }
                 return APIStatus.OK();
             }
@@ -307,8 +308,7 @@ namespace Shoko.Server.API.v2.Modules
             if (vl == null) return APIStatus.NotFound("VideoLocal Not Found");
             SVR_VideoLocal_Place pl = vl.GetBestVideoLocalPlace(true);
             if (pl?.FullServerPath == null) return APIStatus.NotFound("videolocal_place not found");
-            CommandRequest_HashFile cr_hashfile = new CommandRequest_HashFile(pl.FullServerPath, true);
-            cr_hashfile.Save();
+            CommandQueue.Queue.Instance.Add(new CmdHashFile(pl.FullServerPath, true));
 
             return APIStatus.OK();
         }
@@ -327,8 +327,7 @@ namespace Shoko.Server.API.v2.Modules
                 {
                     SVR_VideoLocal_Place pl = vl.GetBestVideoLocalPlace(true);
                     if (pl?.FullServerPath == null) continue;
-                    CommandRequest_HashFile cr_hashfile = new CommandRequest_HashFile(pl.FullServerPath, true);
-                    cr_hashfile.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdHashFile(pl.FullServerPath, true));
                 }
             }
             catch (Exception ex)
@@ -353,8 +352,7 @@ namespace Shoko.Server.API.v2.Modules
                 {
                     SVR_VideoLocal_Place pl = vl.GetBestVideoLocalPlace(true);
                     if (pl?.FullServerPath == null) continue;
-                    CommandRequest_HashFile cr_hashfile = new CommandRequest_HashFile(pl.FullServerPath, true);
-                    cr_hashfile.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdHashFile(pl.FullServerPath, true));
                 }
             }
             catch (Exception ex)
@@ -521,9 +519,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("queue/pause")]
         public ActionResult PauseQueue()
         {
-            ShokoService.CmdProcessorHasher.Paused = true;
-            ShokoService.CmdProcessorGeneral.Paused = true;
-            ShokoService.CmdProcessorImages.Paused = true;
+            CommandQueue.Queue.Instance.Stop();
             return APIStatus.OK();
         }
 
@@ -534,9 +530,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("queue/start")]
         public ActionResult StartQueue()
         {
-            ShokoService.CmdProcessorHasher.Paused = false;
-            ShokoService.CmdProcessorGeneral.Paused = false;
-            ShokoService.CmdProcessorImages.Paused = false;
+            CommandQueue.Queue.Instance.Start();
             return APIStatus.OK();
         }
 
@@ -550,7 +544,7 @@ namespace Shoko.Server.API.v2.Modules
             QueueInfo queue = new QueueInfo
             {
                 count = ServerInfo.Instance.HasherQueueCount,
-                state = ServerInfo.Instance.HasherQueueState,
+                state = ServerInfo.Instance.HasherQueueState.PrettyDescription.FormatMessage()+" "+ ServerInfo.Instance.HasherQueueState.Progress+" %",
                 isrunning = ServerInfo.Instance.HasherQueueRunning,
                 ispause = ServerInfo.Instance.HasherQueuePaused
             };
@@ -567,7 +561,7 @@ namespace Shoko.Server.API.v2.Modules
             QueueInfo queue = new QueueInfo
             {
                 count = ServerInfo.Instance.GeneralQueueCount,
-                state = ServerInfo.Instance.GeneralQueueState,
+                state = ServerInfo.Instance.GeneralQueueState.PrettyDescription.FormatMessage() + " " + ServerInfo.Instance.GeneralQueueState.Progress + " %",
                 isrunning = ServerInfo.Instance.GeneralQueueRunning,
                 ispause = ServerInfo.Instance.GeneralQueuePaused
             };
@@ -584,7 +578,7 @@ namespace Shoko.Server.API.v2.Modules
             QueueInfo queue = new QueueInfo
             {
                 count = ServerInfo.Instance.ImagesQueueCount,
-                state = ServerInfo.Instance.ImagesQueueState,
+                state = ServerInfo.Instance.ImagesQueueState.PrettyDescription.FormatMessage() + " " + ServerInfo.Instance.ImagesQueueState.Progress + " %",
                 isrunning = ServerInfo.Instance.ImagesQueueRunning,
                 ispause = ServerInfo.Instance.ImagesQueuePaused
             };
@@ -598,7 +592,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("queue/hasher/pause")]
         public ActionResult PauseHasherQueue()
         {
-            ShokoService.CmdProcessorHasher.Paused = true;
+            CommandQueue.Queue.Instance.PauseWorkTypes(WorkTypes.Hashing);
             return APIStatus.OK();
         }
 
@@ -609,7 +603,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("queue/general/pause")]
         public ActionResult PauseGeneralQueue()
         {
-            ShokoService.CmdProcessorGeneral.Paused = true;
+            CommandQueue.Queue.Instance.PauseWorkTypes(CommandQueue.Queue.GeneralWorkTypesExceptSchedule);
             return APIStatus.OK();
         }
 
@@ -620,7 +614,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("queue/images/pause")]
         public ActionResult PauseImagesQueue()
         {
-            ShokoService.CmdProcessorImages.Paused = true;
+            CommandQueue.Queue.Instance.PauseWorkTypes(WorkTypes.Image);
             return APIStatus.OK();
         }
 
@@ -631,7 +625,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("queue/hasher/start")]
         public ActionResult StartHasherQueue()
         {
-            ShokoService.CmdProcessorHasher.Paused = false;
+            CommandQueue.Queue.Instance.ResumeWorkTypes(WorkTypes.Hashing);
             return APIStatus.OK();
         }
 
@@ -642,7 +636,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("queue/general/start")]
         public ActionResult StartGeneralQueue()
         {
-            ShokoService.CmdProcessorGeneral.Paused = false;
+            CommandQueue.Queue.Instance.ResumeWorkTypes(CommandQueue.Queue.GeneralWorkTypesExceptSchedule);
             return APIStatus.OK();
         }
 
@@ -653,7 +647,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("queue/images/start")]
         public ActionResult StartImagesQueue()
         {
-            ShokoService.CmdProcessorImages.Paused = false;
+            CommandQueue.Queue.Instance.ResumeWorkTypes(WorkTypes.Image);
             return APIStatus.OK();
         }
 
@@ -666,11 +660,7 @@ namespace Shoko.Server.API.v2.Modules
         {
             try
             {
-                ShokoService.CmdProcessorHasher.Stop();
-
-                Repo.Instance.CommandRequest.ClearHasherQueue();
-                ShokoService.CmdProcessorHasher.Init();
-
+                CommandQueue.Queue.Instance.ClearWorkTypes(WorkTypes.Hashing);
                 return APIStatus.OK();
             }
             catch
@@ -688,11 +678,7 @@ namespace Shoko.Server.API.v2.Modules
         {
             try
             {
-                ShokoService.CmdProcessorGeneral.Stop();
-
-                Repo.Instance.CommandRequest.ClearGeneralQueue();
-                ShokoService.CmdProcessorGeneral.Init();
-
+                CommandQueue.Queue.Instance.ClearWorkTypes(CommandQueue.Queue.GeneralWorkTypesExceptSchedule);                
                 return APIStatus.OK();
             }
             catch
@@ -711,11 +697,7 @@ namespace Shoko.Server.API.v2.Modules
         {
             try
             {
-                ShokoService.CmdProcessorImages.Stop();
-
-                Repo.Instance.CommandRequest.ClearImageQueue();
-                ShokoService.CmdProcessorImages.Init();
-
+                CommandQueue.Queue.Instance.ClearWorkTypes(WorkTypes.Image);
                 return APIStatus.OK();
             }
             catch
@@ -1305,8 +1287,7 @@ namespace Shoko.Server.API.v2.Modules
                         upd.Commit();
                     }
 
-                    //CommandRequest_VoteAnime cmdVote = new CommandRequest_VoteAnime(animeID, voteType, voteValue);
-                    //cmdVote.Save();
+                    //CommandQueue.Queue.Instance.Add(new CmdVoteAnime(animeID, voteType, voteValue));
 
                     return APIStatus.OK();
                 }
@@ -1459,21 +1440,11 @@ namespace Shoko.Server.API.v2.Modules
             BookmarkedAnime ba = null;
             if (id != 0)
             {
-                ba = Repo.Instance.BookmarkedAnime.GetByAnimeID(id);
-                if (ba != null)
-                {
-                    Repo.Instance.BookmarkedAnime.Delete(ba);
-                    return APIStatus.OK();
-                }
-                else
-                {
+                if (!Repo.Instance.BookmarkedAnime.FindAndDelete(()=> Repo.Instance.BookmarkedAnime.GetByAnimeID(id)))
                     return APIStatus.NotFound();
-                }
+                return APIStatus.OK();
             }
-            else
-            {
-                return APIStatus.BadRequest();
-            }
+            return APIStatus.BadRequest();
         }
 
         /// <summary>
@@ -2643,9 +2614,7 @@ namespace Shoko.Server.API.v2.Modules
                 upd.Commit();
             }
 
-            CommandRequest_VoteAnime cmdVote =
-                new CommandRequest_VoteAnime(ser.AniDB_ID, voteType, Convert.ToDecimal(score / 100));
-            cmdVote.Save();
+            CommandQueue.Queue.Instance.Add(new CmdAniDBVoteAnime(ser.AniDB_ID, voteType, Convert.ToDecimal(score / 100)));
             return APIStatus.OK();
         }
 

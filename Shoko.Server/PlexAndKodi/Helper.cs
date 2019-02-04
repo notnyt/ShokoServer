@@ -11,11 +11,12 @@ using Shoko.Models.Client;
 using Shoko.Models.Enums;
 using Shoko.Models.PlexAndKodi;
 using Shoko.Models.Server;
-using Shoko.Server.Databases;
+using Shoko.Models.Server.CrossRef;
 using Shoko.Server.Extensions;
 using Shoko.Server.ImageDownload;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories;
+using Shoko.Server.Settings;
 using AnimeTypes = Shoko.Models.PlexAndKodi.AnimeTypes;
 using Directory = Shoko.Models.PlexAndKodi.Directory;
 using Stream = Shoko.Models.PlexAndKodi.Stream;
@@ -187,7 +188,7 @@ namespace Shoko.Server.PlexAndKodi
                 Id = v.VideoLocalID,
                 Type = "episode",
                 Summary = "Episode Overview Not Available", //TODO Intenationalization
-                Title = Path.GetFileNameWithoutExtension(v.FileName),
+                Title = Path.GetFileNameWithoutExtension(v.Info),
                 AddedAt = v.DateTimeCreated.ToUnixTime(),
                 UpdatedAt = v.DateTimeUpdated.ToUnixTime(),
                 OriginallyAvailableAt = v.DateTimeCreated.ToPlexDate(),
@@ -204,7 +205,7 @@ namespace Shoko.Server.PlexAndKodi
             {
                 SVR_VideoLocal_Place pl = v.GetBestVideoLocalPlace();
                 if (pl != null)
-                    using (var upd = Repo.Instance.VideoLocal.BeginAddOrUpdate(() => v))
+                    using (var upd = Repo.Instance.VideoLocal.BeginAddOrUpdate(v))
                     {
                         if (pl.RefreshMediaInfo(upd.Entity)) upd.Commit(true);
                     }
@@ -220,15 +221,14 @@ namespace Shoko.Server.PlexAndKodi
         }
 
 
-        public static Video VideoFromAnimeEpisode(IProvider prov, List<CrossRef_AniDB_TvDBV2> cross,
-            KeyValuePair<SVR_AnimeEpisode, CL_AnimeEpisode_User> e, int userid)
+        public static Video VideoFromAnimeEpisode(IProvider prov, List<CL_CrossRef_AniDB_Provider> cross, KeyValuePair<SVR_AnimeEpisode, CL_AnimeEpisode_User> e, int userid)
         {
             Video v = e.Key.PlexContract?.Clone<Video>(prov);
             if (v?.Thumb != null)
                 v.Thumb = prov.ReplaceSchemeHost(v.Thumb);
             if (v != null && (v.Medias == null || v.Medias.Count == 0))
             {
-                using (var upd = Repo.Instance.AnimeEpisode.BeginAddOrUpdate(() => e.Key))
+                using (var upd = Repo.Instance.AnimeEpisode.BeginAddOrUpdate(e.Key))
                 {
 
                     foreach (SVR_VideoLocal vl2 in upd.Entity.GetVideoLocals())
@@ -237,7 +237,7 @@ namespace Shoko.Server.PlexAndKodi
                         SVR_VideoLocal_Place pl = vl2.GetBestVideoLocalPlace();
 
                         if (pl != null)
-                            using (var upd2 = Repo.Instance.VideoLocal.BeginAddOrUpdate(() => vl2))
+                            using (var upd2 = Repo.Instance.VideoLocal.BeginAddOrUpdate(vl2))
                             {
                                 if (pl.RefreshMediaInfo(upd2.Entity)) upd2.Commit(true);
                             }
@@ -270,13 +270,9 @@ namespace Shoko.Server.PlexAndKodi
 
                 if (cross != null && cross.Count > 0)
                 {
-                    CrossRef_AniDB_TvDBV2 c2 =
-                        cross.FirstOrDefault(
-                            a =>
-                                a.AniDBStartEpisodeType == v.EpisodeType &&
-                                a.AniDBStartEpisodeNumber <= v.EpisodeNumber);
-                    if (c2?.TvDBSeasonNumber > 0)
-                        v.ParentIndex = c2.TvDBSeasonNumber;
+                    CrossRef_AniDB_ProviderEpisode ep = cross.Select(a => a.GetEpisodesWithOverrides().FirstOrDefault(b=>b.AniDBEpisodeID==e.Key.AniDB_EpisodeID)).FirstOrDefault(a=>a!=null);
+                    if (ep != null && ep.Season > 0)
+                        v.ParentIndex = ep.Season;
                 }
                 AddLinksToAnimeEpisodeVideo(prov, v, userid);
             }
@@ -296,7 +292,7 @@ namespace Shoko.Server.PlexAndKodi
             if (vids.Count > 0)
             {
                 //List<string> hashes = vids.Select(a => a.Hash).Distinct().ToList();
-                l.Title = Path.GetFileNameWithoutExtension(vids[0].FileName);
+                l.Title = Path.GetFileNameWithoutExtension(vids[0].Info);
                 l.AddedAt = vids[0].DateTimeCreated.ToUnixTime();
                 l.UpdatedAt = vids[0].DateTimeUpdated.ToUnixTime();
                 l.OriginallyAvailableAt = vids[0].DateTimeCreated.ToPlexDate();
@@ -308,7 +304,7 @@ namespace Shoko.Server.PlexAndKodi
                     {
                         SVR_VideoLocal_Place pl = v.GetBestVideoLocalPlace();
                         if (pl != null)
-                            using (var upd = Repo.Instance.VideoLocal.BeginAddOrUpdate(() => v))
+                            using (var upd = Repo.Instance.VideoLocal.BeginAddOrUpdate(v))
                             {
                                 if (pl.RefreshMediaInfo(upd.Entity)) upd.Commit(true);
                             }
@@ -604,7 +600,7 @@ namespace Shoko.Server.PlexAndKodi
                             Value = seiyuu?.SeiyuuName
                         };
                         if (seiyuu != null)
-                            t.TagPicture = Helper.ConstructSeiyuuImage(null, seiyuu.AniDB_SeiyuuID);
+                            t.TagPicture = Helper.ConstructSeiyuuImage(null, seiyuu.SeiyuuID);
                         t.Role = ch;
                         t.RoleDescription = c?.CharDescription;
                         t.RolePicture = Helper.ConstructCharacterImage(null, c.CharID);
@@ -773,14 +769,14 @@ namespace Shoko.Server.PlexAndKodi
                                 Repo.Instance.AniDB_Vote.GetByEntityAndType(anidb.AnimeID, AniDBVoteType.AnimeTemp);
             if (vote != null) p.UserRating = (int)(vote.VoteValue / 100D);
 
-            List<CrossRef_AniDB_TvDBV2> ls = ser.CrossRefAniDBTvDBV2;
+            List<CL_CrossRef_AniDB_Provider> ls = ser.CrossRefAniDBTvDBV2;
             if (ls != null && ls.Count > 0)
             {
-                foreach (CrossRef_AniDB_TvDBV2 c in ls)
+                CrossRef_AniDB_ProviderEpisode ep = ls.Select(a => a.GetEpisodesWithOverrides().FirstOrDefault()).FirstOrDefault(a => a != null);
+                if (ep != null)
                 {
-                    if (c.TvDBSeasonNumber == 0) continue;
-                    p.Season = c.TvDBSeasonNumber.ToString();
-                    p.Index = c.TvDBSeasonNumber;
+                    p.Season = ep.Season.ToString();
+                    p.Index = ep.Season;
                 }
             }
             p.Thumb = p.ParentThumb = anime.DefaultImagePoster.GenPoster(null);
@@ -829,7 +825,7 @@ namespace Shoko.Server.PlexAndKodi
                         Value = seiyuu?.SeiyuuName
                     };
                     if (seiyuu != null)
-                        t.TagPicture = ConstructSeiyuuImage(null, seiyuu.AniDB_SeiyuuID);
+                        t.TagPicture = ConstructSeiyuuImage(null, seiyuu.SeiyuuID);
                     t.Role = ch;
                     t.RoleDescription = c?.CharDescription;
                     t.RolePicture = ConstructCharacterImage(null, c.CharID);

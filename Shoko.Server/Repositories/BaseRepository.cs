@@ -6,11 +6,9 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
-using Nito.AsyncEx;
-using NutzCode.InMemoryIndex;
 using Shoko.Commons.Extensions;
-using Shoko.Server.Databases;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories
 {
@@ -83,6 +81,7 @@ namespace Shoko.Server.Repositories
                 return IsCached ? Cache.Keys.ToList() : Table.Select(SelectKey).ToList();
             }
         }
+        /*
         public void Delete(TS id, TT pars = default(TT))
         {
             using (RepoLock.ReaderLock())
@@ -129,7 +128,7 @@ namespace Shoko.Server.Repositories
             foreach (T e in listed)
                 EndDelete(e, savedobjects[e], pars);
         }
-
+        */
 
 
         private int IntAutoGen = -1;
@@ -183,8 +182,8 @@ namespace Shoko.Server.Repositories
         {
             using (RepoLock.WriterLock())
             {
-                IEnumerable<T> objs = find_function().Where(s => !(s is null));
-                if (!objs.Any())
+                IEnumerable<T> objs = find_function()?.Where(s => !(s is null));
+                if (objs==null || !objs.Any())
                     return false;
                 Dictionary<T, object> savedobjects = new Dictionary<T, object>();
                 foreach (T e in objs)
@@ -248,7 +247,7 @@ namespace Shoko.Server.Repositories
             }
         }
 
-        public List<T> Touch(Func<List<T>> find_function, TT pars = default(TT))
+        public List<T> Touch(Func<IEnumerable<T>> find_function, TT pars = default(TT))
         {
             using (var upd = new AtomicLockBatchUpdate<T, TS, TT>(this, find_function))
             {

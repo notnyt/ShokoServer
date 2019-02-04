@@ -4,7 +4,7 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Threading;
 
-namespace Shoko.Server
+namespace Shoko.Server.Utilities
 {
     public class AsyncObservableCollection<T> : ObservableCollection<T>
     {
@@ -28,6 +28,10 @@ namespace Shoko.Server
                 _synchronizationContext.Send(RaiseCollectionChanged, e);
         }
 
+        public void DoItemChange(T item)
+        {
+            OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Replace,item,item,IndexOf(item)));
+        }
         private void RaiseCollectionChanged(object param)
         {
             base.OnCollectionChanged((NotifyCollectionChangedEventArgs) param);

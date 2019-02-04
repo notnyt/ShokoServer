@@ -1,7 +1,5 @@
 ﻿using System;
-using Shoko.Server.Databases;
 using NLog;
-using Shoko.Server.Commands;
 using Shoko.Models.TvDB;
 using Shoko.Server.Providers.AniDB;
 
@@ -97,7 +95,7 @@ namespace Shoko.Server
             }
             set { lastAniDBPing = value; }
         }
-
+        /*
         private static CommandProcessorGeneral cmdProcessorGeneral = new CommandProcessorGeneral();
 
         public static CommandProcessorGeneral CmdProcessorGeneral
@@ -136,7 +134,7 @@ namespace Shoko.Server
                 }
             }
         }
-
+        */
         private static AniDBHelper anidbProcessor = new AniDBHelper();
 
         public static AniDBHelper AnidbProcessor

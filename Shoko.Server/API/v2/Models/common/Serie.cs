@@ -14,6 +14,8 @@ using Shoko.Server.PlexAndKodi;
 using Shoko.Server.Providers.TvDB;
 using Shoko.Server.Repositories;
 using Microsoft.AspNetCore.Http;
+using Shoko.Server.CommandQueue.Commands.AniDB;
+using Shoko.Server.Utilities;
 
 namespace Shoko.Server.API.v2.Models.common
 {
@@ -65,9 +67,8 @@ namespace Shoko.Server.API.v2.Models.common
             SVR_AniDB_Anime aniDB_Anime = Repo.Instance.AniDB_Anime.GetByID(bookmark.AnimeID);
             if (aniDB_Anime == null)
             {
-                Commands.CommandRequest_GetAnimeHTTP cr_anime = new Commands.CommandRequest_GetAnimeHTTP(bookmark.AnimeID, true, false);
-                cr_anime.Save();
-
+                CommandQueue.Queue.Instance.Add(new CmdAniDBGetAnimeHTTP(bookmark.AnimeID, true, false));
+ 
                 Serie empty_serie = new Serie
                 {
                     id = -1,
@@ -322,11 +323,11 @@ namespace Shoko.Server.API.v2.Models.common
         public static void PopulateArtFromAniDBAnime(HttpContext ctx, SVR_AniDB_Anime anime, Serie sr, bool allpics, int pic)
         {
             Random rand = new Random();
-            var tvdbIDs = Repo.Instance.CrossRef_AniDB_TvDB.GetByAnimeID(anime.AnimeID).ToList();
+            var tvdbIDs = Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(anime.AnimeID,CrossRefType.TvDB).ToList();
             var fanarts = tvdbIDs
-                .SelectMany(a => Repo.Instance.TvDB_ImageFanart.GetBySeriesID(a.TvDBID)).ToList();
+                .SelectMany(a => Repo.Instance.TvDB_ImageFanart.GetBySeriesID(int.Parse(a.CrossRefID))).ToList();
             var banners = tvdbIDs
-                .SelectMany(a => Repo.Instance.TvDB_ImageWideBanner.GetBySeriesID(a.TvDBID)).ToList();
+                .SelectMany(a => Repo.Instance.TvDB_ImageWideBanner.GetBySeriesID(int.Parse(a.CrossRefID))).ToList();
 
             if (allpics || pic > 1)
             {

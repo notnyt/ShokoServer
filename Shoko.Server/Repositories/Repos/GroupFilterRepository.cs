@@ -5,7 +5,6 @@ using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
-using NutzCode.InMemoryIndex;
 using Shoko.Commons;
 using Shoko.Commons.Extensions;
 using Shoko.Commons.Utils;
@@ -13,9 +12,9 @@ using Shoko.Models;
 using Shoko.Models.Client;
 using Shoko.Models.Enums;
 using Shoko.Models.Server;
-using Shoko.Server.Databases;
 using Shoko.Server.Extensions;
 using Shoko.Server.Models;
+using Shoko.Server.Repositories.Cache;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
 
 namespace Shoko.Server.Repositories.Repos
@@ -119,7 +118,7 @@ namespace Shoko.Server.Repositories.Repos
             IReadOnlyList<SVR_GroupFilter> all = GetAll();
             HashSet<SVR_GroupFilter> set = new HashSet<SVR_GroupFilter>(all);
             List<SVR_GroupFilter> notin = all.Except(set).ToList();
-            Delete(notin);
+            this.Delete(notin.Select(a => a.GroupFilterID));
             PostProcessFilters = null;
             lock (Changes)
             {
@@ -142,11 +141,7 @@ namespace Shoko.Server.Repositories.Repos
 
         public void CleanUpEmptyDirectoryFilters()
         {
-            List<SVR_GroupFilter> toremove = GetAll()
-                .Where(a => (a.FilterType & (int) GroupFilterType.Directory) == (int) GroupFilterType.Directory).Where(
-                    gf => gf.GroupsIds.Count == 0 && string.IsNullOrEmpty(gf.GroupsIdsString) &&
-                          gf.SeriesIds.Count == 0 && string.IsNullOrEmpty(gf.SeriesIdsString)).ToList();
-            Delete(toremove);
+            FindAndDelete(() => GetAll().Where(a => (a.FilterType & (int) GroupFilterType.Directory) == (int) GroupFilterType.Directory).Where(gf => gf.GroupsIds.Count == 0 && string.IsNullOrEmpty(gf.GroupsIdsString) && gf.SeriesIds.Count == 0 && string.IsNullOrEmpty(gf.SeriesIdsString)).ToList());
         }
 
         public void CreateOrVerifyLockedFilters(IProgress<InitProgress> progress = null)
@@ -618,7 +613,7 @@ namespace Shoko.Server.Repositories.Repos
                     }
                 });
 
-                FindAndDelete(() => toRemove);
+                this.Delete(toRemove);
 
                 return somethingDictionary.Keys.ToDictionary(key => key, key => somethingDictionary[key]
                     .SelectMany(p => p.Value, Tuple.Create)

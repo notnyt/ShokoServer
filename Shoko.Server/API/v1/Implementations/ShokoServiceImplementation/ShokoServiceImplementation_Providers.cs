@@ -3,34 +3,39 @@ using System.Collections.Generic;
 using System.Linq;
 using Microsoft.AspNetCore.Mvc;
 using Shoko.Commons.Extensions;
-using Shoko.Models.Azure;
 using Shoko.Models.Client;
 using Shoko.Models.Enums;
 using Shoko.Models.Interfaces;
 using Shoko.Models.Server;
+using Shoko.Models.Server.CrossRef;
 using Shoko.Models.TvDB;
-using Shoko.Server.Commands;
-using Shoko.Server.Commands.TvDB;
-using Shoko.Server.Databases;
+using Shoko.Models.WebCache;
+using Shoko.Server.CommandQueue.Commands.Trakt;
+using Shoko.Server.CommandQueue.Commands.TvDB;
+
 using Shoko.Server.Extensions;
 using Shoko.Server.Models;
-using Shoko.Server.Providers.Azure;
 using Shoko.Server.Providers.MovieDB;
 using Shoko.Server.Providers.TraktTV;
 using Shoko.Server.Providers.TraktTV.Contracts;
+using Shoko.Server.Providers.TraktTV.Contracts.Search;
 using Shoko.Server.Providers.TvDB;
+using Shoko.Server.Providers.WebCache;
 using Shoko.Server.Repositories;
+using Shoko.Server.Settings;
 
 namespace Shoko.Server
 {
     public partial class ShokoServiceImplementation : IShokoServer
     {
+        #region CrossRef
+
         [HttpGet("AniDB/CrossRef/{animeID}")]
         public CL_AniDB_AnimeCrossRefs GetCrossRefDetails(int animeID)
         {
             CL_AniDB_AnimeCrossRefs result = new CL_AniDB_AnimeCrossRefs
             {
-                CrossRef_AniDB_TvDB = new List<CrossRef_AniDB_TvDBV2>(),
+                CrossRef_AniDB_TvDB = new List<CL_CrossRef_AniDB_Provider>(),
                 TvDBSeries = new List<TvDB_Series>(),
                 TvDBEpisodes = new List<TvDB_Episode>(),
                 TvDBImageFanarts = new List<TvDB_ImageFanart>(),
@@ -44,7 +49,7 @@ namespace Shoko.Server
 
                 CrossRef_AniDB_MAL = null,
 
-                CrossRef_AniDB_Trakt = new List<CrossRef_AniDB_TraktV2>(),
+                CrossRef_AniDB_Trakt = new List<CL_CrossRef_AniDB_Provider>(),
                 TraktShows = new List<CL_Trakt_Show>(),
                 AnimeID = animeID
             };
@@ -54,7 +59,7 @@ namespace Shoko.Server
                 SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(animeID);
                 if (anime == null) return result;
 
-                var xrefs = Repo.Instance.CrossRef_AniDB_TvDB.GetV2LinksFromAnime(animeID);
+                var xrefs = Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeID,CrossRefType.TvDB).Select(a=>a.ToClient()).ToList();
 
                 // TvDB
                 result.CrossRef_AniDB_TvDB = xrefs;
@@ -62,37 +67,36 @@ namespace Shoko.Server
                 foreach (TvDB_Episode ep in anime.GetTvDBEpisodes())
                     result.TvDBEpisodes.Add(ep);
 
-                foreach (var xref in xrefs.DistinctBy(a => a.TvDBID))
+                foreach (var xref in xrefs.DistinctBy(a => a.CrossRefID))
                 {
-                    TvDB_Series ser = Repo.Instance.TvDB_Series.GetByTvDBID(xref.TvDBID);
+                    TvDB_Series ser = Repo.Instance.TvDB_Series.GetByTvDBID(int.Parse(xref.CrossRefID));
                     if (ser != null)
                         result.TvDBSeries.Add(ser);
 
-                    foreach (TvDB_ImageFanart fanart in Repo.Instance.TvDB_ImageFanart.GetBySeriesID(xref.TvDBID))
+                    foreach (TvDB_ImageFanart fanart in Repo.Instance.TvDB_ImageFanart.GetBySeriesID(int.Parse(xref.CrossRefID)))
                         result.TvDBImageFanarts.Add(fanart);
 
-                    foreach (TvDB_ImagePoster poster in Repo.Instance.TvDB_ImagePoster.GetBySeriesID(xref.TvDBID))
+                    foreach (TvDB_ImagePoster poster in Repo.Instance.TvDB_ImagePoster.GetBySeriesID(int.Parse(xref.CrossRefID)))
                         result.TvDBImagePosters.Add(poster);
 
-                    foreach (TvDB_ImageWideBanner banner in Repo.Instance.TvDB_ImageWideBanner.GetBySeriesID(xref
-                        .TvDBID))
+                    foreach (TvDB_ImageWideBanner banner in Repo.Instance.TvDB_ImageWideBanner.GetBySeriesID(int.Parse(xref.CrossRefID)))
                         result.TvDBImageWideBanners.Add(banner);
                 }
 
                 // Trakt
 
 
-                foreach (CrossRef_AniDB_TraktV2 xref in anime.GetCrossRefTraktV2())
+                foreach (CL_CrossRef_AniDB_Provider xref in anime.GetCrossRefTraktV2().Select(a=>a.ToClient()))
                 {
                     result.CrossRef_AniDB_Trakt.Add(xref);
 
-                    Trakt_Show show = Repo.Instance.Trakt_Show.GetByTraktSlug(xref.TraktID);
+                    Trakt_Show show = Repo.Instance.Trakt_Show.GetByTraktSlug(xref.CrossRefID);
                     if (show != null) result.TraktShows.Add(show.ToClient());
                 }
 
 
                 // MovieDB
-                CrossRef_AniDB_Other xrefMovie = anime.GetCrossRefMovieDB();
+                SVR_CrossRef_AniDB_Provider xrefMovie = anime.GetCrossRefMovieDB();
                 result.CrossRef_AniDB_MovieDB = xrefMovie;
 
 
@@ -114,13 +118,13 @@ namespace Shoko.Server
                 }
 
                 // MAL
-                List<CrossRef_AniDB_MAL> xrefMAL = anime.GetCrossRefMAL();
+                List<SVR_CrossRef_AniDB_Provider> xrefMAL = anime.GetCrossRefMAL();
                 if (xrefMAL == null)
                     result.CrossRef_AniDB_MAL = null;
                 else
                 {
-                    result.CrossRef_AniDB_MAL = new List<CrossRef_AniDB_MAL>();
-                    foreach (CrossRef_AniDB_MAL xrefTemp in xrefMAL)
+                    result.CrossRef_AniDB_MAL = new List<CrossRef_AniDB_Provider>();
+                    foreach (SVR_CrossRef_AniDB_Provider xrefTemp in xrefMAL)
                         result.CrossRef_AniDB_MAL.Add(xrefTemp);
                 }
                 return result;
@@ -132,157 +136,82 @@ namespace Shoko.Server
             }
         }
 
-        #region Web Cache Admin
-
-        [HttpGet("WebCache/IsAdmin")]
-        public bool IsWebCacheAdmin()
+        [HttpGet("CrossRef/{linkType}")]
+        public List<CL_CrossRef_AniDB_Provider> GetAllCrossRef(int linkType)
         {
             try
             {
-                string res = AzureWebAPI.Admin_AuthUser();
-                return string.IsNullOrEmpty(res);
+                return Repo.Instance.CrossRef_AniDB_Provider.GetByType((CrossRefType)linkType).Select(a => a.ToClient()).ToList();
             }
             catch (Exception ex)
             {
                 logger.Error(ex, ex.ToString());
-                return false;
+                return null;
             }
         }
+        [HttpPost("CrossRef/FromWebCache")]
+        public string LinkUsingWebCacheLinks(List<WebCache_CrossRef_AniDB_Provider> links)
+        {
+            
+            try
+            {
+                if (links.Count == 0) return "No links were given in the request. This is a bug.";
 
-        [HttpGet("WebCache/RandomLinkForApproval/{linkType}")]
-        public Azure_AnimeLink Admin_GetRandomLinkForApproval(int linkType)
+
+                List<int> animeids = links.Select(a => a.AnimeID).Distinct().ToList();
+
+                foreach(int animeid in animeids)
+                {
+
+                    List<CrossRefType> types = links.Where(a => a.AnimeID == animeid).Select(a => a.CrossRefType).Distinct().ToList();
+                    foreach(CrossRefType type in types)
+                    {
+                        Repo.Instance.CrossRef_AniDB_Provider.FindAndDelete(()=> Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeid, type));
+
+                        // we don't need to proactively remove the link here anymore, as all links are removed when it is not marked as additive
+                       
+                        CommandQueue.Queue.Instance.AddRange(links.Where(a => a.AnimeID == animeid && a.CrossRefType == type).Select(a=>new CmdTvDBLinkAniDB(a.AnimeID, int.Parse(a.CrossRefID), a.IsAdditive)));
+                    }
+                }
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return ex.Message;
+            }
+        }
+      
+
+        [HttpGet("CrossRef/{animeID}/{crossRefType}")]
+        public List<CL_CrossRef_AniDB_Provider> GetAnimeCrossRef(int animeID, int crossRefType)
         {
             try
             {
-                AzureLinkType lType = (AzureLinkType) linkType;
-                Azure_AnimeLink link = null;
+                return Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeID, (CrossRefType)crossRefType).Select(a => a.ToClient()).ToList();
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return null;
+            }
+        }
 
-                switch (lType)
+        [HttpPost("CrossRef/{animeID}/{id}/{crossRefType}")]
+        public string LinkAniDBProvider(int animeID, string id, int crossRefType)
+        {
+            try
+            {
+                CrossRefType xrefType = (CrossRefType)crossRefType;
+
+                switch (xrefType)
                 {
-                    case AzureLinkType.TvDB:
-                        link = AzureWebAPI.Admin_GetRandomTvDBLinkForApproval();
+                    case CrossRefType.MovieDB:
+                        MovieDBHelper.LinkAniDBMovieDB(animeID, int.Parse(id), false);
                         break;
-                    case AzureLinkType.Trakt:
-                        link = AzureWebAPI.Admin_GetRandomTraktLinkForApproval();
-                        break;
                 }
 
-
-                return link;
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return null;
-            }
-        }
-
-        [HttpGet("WebCache/AdminMessages")]
-        public List<Azure_AdminMessage> GetAdminMessages()
-        {
-            try
-            {
-                return ServerInfo.Instance.AdminMessages?.ToList() ?? new List<Azure_AdminMessage>();
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return new List<Azure_AdminMessage>();
-            }
-        }
-
-        #region Admin - TvDB
-
-        [HttpPost("WebCache/CrossRef/TvDB/{crossRef_AniDB_TvDBId}")]
-        public string ApproveTVDBCrossRefWebCache(int crossRef_AniDB_TvDBId)
-        {
-            try
-            {
-                return AzureWebAPI.Admin_Approve_CrossRefAniDBTvDB(crossRef_AniDB_TvDBId);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return null;
-            }
-        }
-
-        [HttpDelete("WebCache/CrossRef/TvDB/{crossRef_AniDB_TvDBId}")]
-        public string RevokeTVDBCrossRefWebCache(int crossRef_AniDB_TvDBId)
-        {
-            try
-            {
-                return AzureWebAPI.Admin_Revoke_CrossRefAniDBTvDB(crossRef_AniDB_TvDBId);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Sends the current user's TvDB links to the web cache, and then admin approves them
-        /// </summary>
-        /// <returns></returns>
-        [HttpPost("WebCache/TvDB/UseLinks/{animeID}")]
-        public string UseMyTvDBLinksWebCache(int animeID)
-        {
-            try
-            {
-                // Get all the links for this user and anime
-                List<CrossRef_AniDB_TvDB> xrefs = Repo.Instance.CrossRef_AniDB_TvDB.GetByAnimeID(animeID);
-                if (xrefs == null) return "No Links found to use";
-
-                SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(animeID);
-                if (anime == null) return "Anime not found";
-
-                // make sure the user doesn't alreday have links
-                List<Azure_CrossRef_AniDB_TvDB> results =
-                    AzureWebAPI.Admin_Get_CrossRefAniDBTvDB(animeID);
-                bool foundLinks = false;
-                if (results != null)
-                {
-                    foreach (Azure_CrossRef_AniDB_TvDB xref in results)
-                    {
-                        if (xref.Username.Equals(ServerSettings.Instance.AniDb.Username,
-                            StringComparison.InvariantCultureIgnoreCase))
-                        {
-                            foundLinks = true;
-                            break;
-                        }
-                    }
-                }
-                if (foundLinks) return "Links already exist, please approve them instead";
-
-                // send the links to the web cache
-                foreach (CrossRef_AniDB_TvDB xref in xrefs)
-                {
-                    AzureWebAPI.Send_CrossRefAniDBTvDB(xref.ToV2Model(), anime.MainTitle);
-                }
-
-                // now get the links back from the cache and approve them
-                results = AzureWebAPI.Admin_Get_CrossRefAniDBTvDB(animeID);
-                if (results != null)
-                {
-                    List<Azure_CrossRef_AniDB_TvDB> linksToApprove =
-                        new List<Azure_CrossRef_AniDB_TvDB>();
-                    foreach (Azure_CrossRef_AniDB_TvDB xref in results)
-                    {
-                        if (xref.Username.Equals(ServerSettings.Instance.AniDb.Username,
-                            StringComparison.InvariantCultureIgnoreCase))
-                            linksToApprove.Add(xref);
-                    }
-
-                    foreach (Azure_CrossRef_AniDB_TvDB xref in linksToApprove)
-                    {
-                        AzureWebAPI.Admin_Approve_CrossRefAniDBTvDB(
-                            xref.CrossRef_AniDB_TvDBV2ID);
-                    }
-                    return "Success";
-                }
-                else
-                    return "Failure to send links to web cache";
+                return string.Empty;
             }
             catch (Exception ex)
             {
@@ -291,16 +220,106 @@ namespace Shoko.Server
             }
         }
 
-        #endregion
-
-        #region Admin - Trakt
-
-        [HttpPost("WebCache/CrossRef/Trakt/{crossRef_AniDB_TraktId}")]
-        public string ApproveTraktCrossRefWebCache(int crossRef_AniDB_TraktId)
+        [HttpDelete("CrossRef/{animeID}/{crossRefType}")]
+        public string RemoveLinkAniDBForAnime(int animeID, int crossRefType)
         {
             try
             {
-                return AzureWebAPI.Admin_Approve_CrossRefAniDBTrakt(crossRef_AniDB_TraktId);
+                SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(animeID);
+
+                if (anime == null) return "Could not find Anime!";
+
+                CrossRefType xrefType = (CrossRefType)crossRefType;
+                switch (xrefType)
+                {
+                    case CrossRefType.MovieDB:
+                        Repo.Instance.AniDB_Anime_DefaultImage.FindAndDelete(() => Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(animeID).Where(a => a.ImageParentType == (int)ImageEntityType.MovieDB_FanArt || a.ImageParentType == (int)ImageEntityType.MovieDB_Poster).ToList());
+                        MovieDBHelper.RemoveLinkAniDBMovieDB(animeID);
+                        break;
+                    case CrossRefType.TraktTV:
+                        return RemoveLinkAniDBTraktForAnime(animeID);
+                    case CrossRefType.TvDB:
+                        return RemoveLinkAniDBTvDBForAnime(animeID);
+                }
+
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return ex.Message;
+            }
+        }
+        #endregion
+
+        #region Web Cache 
+
+        [HttpGet("WebCache/IsAdmin")]
+        public bool IsWebCacheAdmin()
+        {
+            try
+            {
+                if (ServerSettings.Instance.WebCache.Session == null)
+                    return false;
+                return (ServerSettings.Instance.WebCache.Session.Role & WebCache_RoleType.Admin) > 0;
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return false;
+            }
+        }
+        [HttpGet("WebCache/IsModerator")]
+        public bool IsWebCacheModerator()
+        {
+            try
+            {
+                if (ServerSettings.Instance.WebCache.Session == null)
+                    return false;
+                return (ServerSettings.Instance.WebCache.Session.Role & WebCache_RoleType.Moderator) > 0;
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return false;
+            }
+        }
+        [HttpGet("WebCache/RandomLinkForApproval/{linkType}")]
+        public List<WebCache_CrossRef_AniDB_Provider> Admin_GetRandomLinkForApproval(int linkType)
+        {
+            try
+            {
+                return WebCacheAPI.Instance.GetRandomCrossRef_AniDB_Provider((CrossRefType) linkType);
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return null;
+            }
+        }
+        [HttpGet("WebCache/CrossRef/{animeID}/{linkType}")]
+        public List<WebCache_CrossRef_AniDB_Provider> GetCrossRefWebCache(int animeID, int linkType)
+        {
+            try
+            {
+                return WebCacheAPI.Instance.GetCrossRef_AniDB_Provider(animeID, (CrossRefType)linkType);
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return new List<WebCache_CrossRef_AniDB_Provider>();
+            }
+        }
+
+        #region Admin
+
+        [HttpPost("WebCache/CrossRef/{webcache_crossref_id}")]
+        public string ApproveCrossRefWebCache(int webcache_crossref_id)
+        {
+            try
+            {
+                WebCacheAPI.Instance.ManageCrossRef_AniDB_Provider(webcache_crossref_id, true);
+                return "Success";
             }
             catch (Exception ex)
             {
@@ -309,12 +328,14 @@ namespace Shoko.Server
             }
         }
 
-        [HttpDelete("WebCache/CrossRef/Trakt/{crossRef_AniDB_TraktId}")]
-        public string RevokeTraktCrossRefWebCache(int crossRef_AniDB_TraktId)
+        [HttpDelete("WebCache/CrossRef/{webcache_crossref_id}")]
+        public string RevokeCrossRefWebCache(int webcache_crossref_id)
         {
             try
             {
-                return AzureWebAPI.Admin_Revoke_CrossRefAniDBTrakt(crossRef_AniDB_TraktId);
+                WebCacheAPI.Instance.ManageCrossRef_AniDB_Provider(webcache_crossref_id, false);
+                return "Success";
+
             }
             catch (Exception ex)
             {
@@ -324,69 +345,38 @@ namespace Shoko.Server
         }
 
         /// <summary>
-        /// Sends the current user's Trakt links to the web cache, and then admin approves them
+        /// Sends the current user's links to the web cache, and then admin approves them
         /// </summary>
         /// <returns></returns>
-        [HttpPost("WebCache/Trakt/UseLinks/{animeID}")]
-        public string UseMyTraktLinksWebCache(int animeID)
+        [HttpPost("WebCache/UseLinks/{animeID}/{crossRefType}")]
+        public string UseLinksWebCache(int animeID, int crossRefType)
         {
             try
             {
+                
                 // Get all the links for this user and anime
-                List<CrossRef_AniDB_TraktV2> xrefs = Repo.Instance.CrossRef_AniDB_TraktV2.GetByAnimeID(animeID);
+                List<SVR_CrossRef_AniDB_Provider> xrefs = Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeID,(CrossRefType)crossRefType);
                 if (xrefs == null) return "No Links found to use";
 
                 SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(animeID);
                 if (anime == null) return "Anime not found";
 
                 // make sure the user doesn't alreday have links
-                List<Azure_CrossRef_AniDB_Trakt> results =
-                    AzureWebAPI.Admin_Get_CrossRefAniDBTrakt(animeID);
-                bool foundLinks = false;
-                if (results != null)
+                IList<WebCache_CrossRef_AniDB_Provider> results = WebCacheAPI.Instance.GetCrossRef_AniDB_Provider(animeID,(CrossRefType)crossRefType);
+                int foundlinks = 0;
+                foreach (SVR_CrossRef_AniDB_Provider n in xrefs)
                 {
-                    foreach (Azure_CrossRef_AniDB_Trakt xref in results)
-                    {
-                        if (xref.Username.Equals(ServerSettings.Instance.AniDb.Username,
-                            StringComparison.InvariantCultureIgnoreCase))
-                        {
-                            foundLinks = true;
-                            break;
-                        }
-                    }
+                    if (results.FirstOrDefault(a => a.AniDBUserId == ServerSettings.Instance.WebCache.Session.AniDBUserId && a.CrossRefID == n.CrossRefID) != null)
+                        foundlinks++;
                 }
-                if (foundLinks) return "Links already exist, please approve them instead";
-
-                // send the links to the web cache
-                foreach (CrossRef_AniDB_TraktV2 xref in xrefs)
+                if (foundlinks==xrefs.Count)
+                    return "Links already exist, please approve them instead";
+                foreach(SVR_CrossRef_AniDB_Provider c in xrefs)
                 {
-                    AzureWebAPI.Send_CrossRefAniDBTrakt(xref, anime.MainTitle);
+                    WebCacheAPI.Instance.AddCrossRef_AniDB_Provider(c.ToWebCache(),true);
                 }
-
-                // now get the links back from the cache and approve them
-                results = AzureWebAPI.Admin_Get_CrossRefAniDBTrakt(animeID);
-                if (results != null)
-                {
-                    List<Azure_CrossRef_AniDB_Trakt> linksToApprove =
-                        new List<Azure_CrossRef_AniDB_Trakt>();
-                    foreach (Azure_CrossRef_AniDB_Trakt xref in results)
-                    {
-                        if (xref.Username.Equals(ServerSettings.Instance.AniDb.Username,
-                            StringComparison.InvariantCultureIgnoreCase))
-                            linksToApprove.Add(xref);
-                    }
-
-                    foreach (Azure_CrossRef_AniDB_Trakt xref in linksToApprove)
-                    {
-                        AzureWebAPI.Admin_Approve_CrossRefAniDBTrakt(
-                            xref.CrossRef_AniDB_TraktV2ID);
-                    }
-                    return "Success";
-                }
-                else
-                    return "Failure to send links to web cache";
-
-                //return JMMServer.Providers.Azure.AzureWebAPI.Admin_Approve_CrossRefAniDBTrakt(crossRef_AniDB_TraktId);
+                return "Success";
+           
             }
             catch (Exception ex)
             {
@@ -406,8 +396,7 @@ namespace Shoko.Server
         {
             try
             {
-                CommandRequest_TvDBUpdateSeries updateseries = new CommandRequest_TvDBUpdateSeries(seriesID, true);
-                updateseries.Save();
+                CommandQueue.Queue.Instance.Add(new CmdTvDBUpdateSeries(seriesID, true));
             }
             catch (Exception ex)
             {
@@ -431,49 +420,18 @@ namespace Shoko.Server
             return new List<TvDB_Language>();
         }
 
-        [HttpGet("WebCache/CrossRef/TvDB/{animeID}/{isAdmin}")]
-        public List<Azure_CrossRef_AniDB_TvDB> GetTVDBCrossRefWebCache(int animeID, bool isAdmin)
-        {
-            try
-            {
-                if (isAdmin)
-                    return AzureWebAPI.Admin_Get_CrossRefAniDBTvDB(animeID);
-                else
-                    return AzureWebAPI.Get_CrossRefAniDBTvDB(animeID);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return new List<Azure_CrossRef_AniDB_TvDB>();
-            }
-        }
-
-        [HttpGet("TvDB/CrossRef/{animeID}")]
-        public List<CrossRef_AniDB_TvDBV2> GetTVDBCrossRefV2(int animeID)
-        {
-            try
-            {
-                return Repo.Instance.CrossRef_AniDB_TvDB.GetV2LinksFromAnime(animeID);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return null;
-            }
-        }
-
         [HttpGet("TvDB/CrossRef/Preview/{animeID}/{tvdbID}")]
-        public List<CrossRef_AniDB_TvDB_Episode> GetTvDBEpisodeMatchPreview(int animeID, int tvdbID)
+        public List<CrossRef_AniDB_ProviderEpisode> GetTvDBEpisodeMatchPreview(int animeID, int tvdbID)
         {
-            return TvDBLinkingHelper.GetMatchPreviewWithOverrides(animeID, tvdbID);
+            return LinkingHelper.GetMatchPreviewWithOverrides(animeID, tvdbID.ToString(),CrossRefType.TvDB);
         }
 
         [HttpGet("TvDB/CrossRef/Episode/{animeID}")]
-        public List<CrossRef_AniDB_TvDB_Episode_Override> GetTVDBCrossRefEpisode(int animeID)
+        public List<CrossRef_AniDB_ProviderEpisode> GetTVDBCrossRefEpisode(int animeID)
         {
             try
             {
-                return Repo.Instance.CrossRef_AniDB_TvDB_Episode_Override.GetByAnimeID(animeID).ToList();
+                return Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeID,CrossRefType.TvDB).SelectMany(a=>a.EpisodesListOverride.Episodes).ToList();
             }
             catch (Exception ex)
             {
@@ -517,26 +475,23 @@ namespace Shoko.Server
         }
 
         [HttpPost("TvDB/CrossRef")]
-        public string LinkAniDBTvDB(CrossRef_AniDB_TvDBV2 link)
+        public string LinkAniDBTvDB(CL_CrossRef_AniDB_Provider link)
         {
             try
             {
-                CrossRef_AniDB_TvDB xref = Repo.Instance.CrossRef_AniDB_TvDB.GetByAniDBAndTvDBID(link.AnimeID, link.TvDBID);
+               ;
 
-                if (xref != null && link.IsAdditive)
+                if (Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIdAndProvider(CrossRefType.TvDB, link.AnimeID, link.CrossRefID)!=null && link.IsAdditive)
                 {
-                    string msg = $"You have already linked Anime ID {xref.AniDBID} to this TvDB show/season/ep";
-                    SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(xref.AniDBID);
+                    string msg = $"You have already linked Anime ID {link.AnimeID} to this TvDB show/season/ep";
+                    SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(link.AnimeID);
                     if (anime != null)
-                        msg =
-                            $"You have already linked Anime {anime.MainTitle} ({xref.AniDBID}) to this TvDB show/season/ep";
+                        msg =$"You have already linked Anime {anime.MainTitle} ({link.AnimeID}) to this TvDB show/season/ep";
                     return msg;
                 }
 
                 // we don't need to proactively remove the link here anymore, as all links are removed when it is not marked as additive
-                CommandRequest_LinkAniDBTvDB cmdRequest =
-                    new CommandRequest_LinkAniDBTvDB(link.AnimeID, link.TvDBID, link.IsAdditive);
-                cmdRequest.Save();
+                CommandQueue.Queue.Instance.Add(new CmdTvDBLinkAniDB(link.AnimeID, int.Parse(link.CrossRefID), link.IsAdditive));
 
                 return string.Empty;
             }
@@ -546,44 +501,6 @@ namespace Shoko.Server
                 return ex.Message;
             }
         }
-
-        [HttpPost("TvDB/CrossRef/FromWebCache")]
-        public string LinkTvDBUsingWebCacheLinks(List<CrossRef_AniDB_TvDBV2> links)
-        {
-            try
-            {
-                if (links.Count == 0) return "No links were given in the request. This is a bug.";
-
-                var link = links[0];
-
-                var existingLinks = Repo.Instance.CrossRef_AniDB_TvDB.GetByAnimeID(link.AnimeID);
-                Repo.Instance.CrossRef_AniDB_TvDB.Delete(existingLinks);
-                Repo.Instance.CrossRef_AniDB_TvDB_Episode.DeleteAllUnverifiedLinksForAnime(link.AnimeID);
-
-                // we don't need to proactively remove the link here anymore, as all links are removed when it is not marked as additive
-                CommandRequest_LinkAniDBTvDB cmdRequest =
-                    new CommandRequest_LinkAniDBTvDB(link.AnimeID, link.TvDBID, link.IsAdditive);
-                cmdRequest.Save();
-
-                var overrides = TvDBLinkingHelper.GetSpecialsOverridesFromLegacy(links);
-                foreach (var episodeOverride in overrides)
-                {
-                    var exists =
-                        Repo.Instance.CrossRef_AniDB_TvDB_Episode_Override.GetByAniDBAndTvDBEpisodeIDs(
-                            episodeOverride.AniDBEpisodeID, episodeOverride.TvDBEpisodeID);
-                    if (exists != null) continue;
-                    Repo.Instance.CrossRef_AniDB_TvDB_Episode_Override.Touch(() => episodeOverride);
-                }
-
-                return string.Empty;
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return ex.Message;
-            }
-        }
-
         [HttpPost("TvDB/CrossRef/Episode/{aniDBID}/{tvDBID}")]
         public string LinkAniDBTvDBEpisode(int aniDBID, int tvDBID)
         {
@@ -614,27 +531,9 @@ namespace Shoko.Server
 
                 if (ser == null) return "Could not find Series for Anime!";
 
-                List<CrossRef_AniDB_TvDB> xrefs = Repo.Instance.CrossRef_AniDB_TvDB.GetByAnimeID(animeID);
-                if (xrefs == null) return string.Empty;
-
-                foreach (CrossRef_AniDB_TvDB xref in xrefs)
-                {
-                    // check if there are default images used associated
-                    List<AniDB_Anime_DefaultImage> images = Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(animeID);
-                    foreach (AniDB_Anime_DefaultImage image in images)
-                    {
-                        if (image.ImageParentType == (int) ImageEntityType.TvDB_Banner ||
-                            image.ImageParentType == (int) ImageEntityType.TvDB_Cover ||
-                            image.ImageParentType == (int) ImageEntityType.TvDB_FanArt)
-                        {
-                            if (image.ImageParentID == xref.TvDBID)
-                                Repo.Instance.AniDB_Anime_DefaultImage.Delete(image.AniDB_Anime_DefaultImageID);
-                        }
-                    }
-
-                    TvDBApiHelper.RemoveLinkAniDBTvDB(xref.AniDBID, xref.TvDBID);
-                }
-
+                // check if there are default images used associated
+                Repo.Instance.AniDB_Anime_DefaultImage.FindAndDelete(() => Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(animeID).Where(a => a.ImageParentType == (int)ImageEntityType.TvDB_Banner || a.ImageParentType == (int)ImageEntityType.TvDB_Cover || a.ImageParentType == (int)ImageEntityType.TvDB_FanArt).ToList());
+                TvDBApiHelper.RemoveAllAniDBTvDBLinks(animeID,true);
                 return string.Empty;
             }
             catch (Exception ex)
@@ -645,7 +544,7 @@ namespace Shoko.Server
         }
 
         [HttpDelete("TvDB/CrossRef")]
-        public string RemoveLinkAniDBTvDB(CrossRef_AniDB_TvDBV2 link)
+        public string RemoveLinkAniDBTvDB(CL_CrossRef_AniDB_Provider link)
         {
             try
             {
@@ -654,19 +553,8 @@ namespace Shoko.Server
                 if (ser == null) return "Could not find Series for Anime!";
 
                 // check if there are default images used associated
-                List<AniDB_Anime_DefaultImage> images = Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(link.AnimeID);
-                foreach (AniDB_Anime_DefaultImage image in images)
-                {
-                    if (image.ImageParentType == (int) ImageEntityType.TvDB_Banner ||
-                        image.ImageParentType == (int) ImageEntityType.TvDB_Cover ||
-                        image.ImageParentType == (int) ImageEntityType.TvDB_FanArt)
-                    {
-                        if (image.ImageParentID == link.TvDBID)
-                            Repo.Instance.AniDB_Anime_DefaultImage.Delete(image.AniDB_Anime_DefaultImageID);
-                    }
-                }
-
-                TvDBApiHelper.RemoveLinkAniDBTvDB(link.AnimeID, link.TvDBID);
+                Repo.Instance.AniDB_Anime_DefaultImage.FindAndDelete(() => Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(link.AnimeID).Where(a => a.ImageParentType == (int)ImageEntityType.TvDB_Banner || a.ImageParentType == (int)ImageEntityType.TvDB_Cover || a.ImageParentType == (int)ImageEntityType.TvDB_FanArt).ToList());
+                TvDBApiHelper.RemoveLinkAniDBTvDB(link.AnimeID, int.Parse(link.CrossRefID));
 
                 return string.Empty;
             }
@@ -677,7 +565,7 @@ namespace Shoko.Server
             }
         }
 
-        [HttpDelete("TvDB/CrossRef/Episode/{aniDBEpisodeID}")]
+        [HttpDelete("TvDB/CrossRef/Episode/{aniDBEpisodeID}/{tvDBEpisodeID}")]
         public string RemoveLinkAniDBTvDBEpisode(int aniDBEpisodeID, int tvDBEpisodeID)
         {
             try
@@ -686,14 +574,14 @@ namespace Shoko.Server
 
                 if (ep == null) return "Could not find Episode";
 
-                CrossRef_AniDB_TvDB_Episode_Override xref =
-                    Repo.Instance.CrossRef_AniDB_TvDB_Episode_Override.GetByAniDBAndTvDBEpisodeIDs(aniDBEpisodeID,
-                        tvDBEpisodeID);
-                if (xref == null) return "Could not find Link!";
-
-
-                Repo.Instance.CrossRef_AniDB_TvDB_Episode_Override.Delete(xref.CrossRef_AniDB_TvDB_Episode_OverrideID);
-
+                using (var upd = Repo.Instance.CrossRef_AniDB_Provider.BeginAddOrUpdate(() => Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(ep.AnimeID, CrossRefType.TvDB).FirstOrDefault(a => a.EpisodesListOverride.GetByProviderId(tvDBEpisodeID.ToString()) != null)))
+                {
+                    if (!upd.IsUpdate)
+                       return "Could not find Link!";
+                    upd.Entity.EpisodesListOverride.DeleteFromProviderEpisodeId(tvDBEpisodeID.ToString());
+                    if (upd.Entity.EpisodesListOverride.NeedPersitance)
+                        upd.Commit();
+                }
                 return string.Empty;
             }
             catch (Exception ex)
@@ -792,6 +680,11 @@ namespace Shoko.Server
                 return new List<Trakt_Episode>();
             }
         }
+        [HttpGet("Trakt/CrossRef/Preview/{animeID}/{traktID}")]
+        public List<CrossRef_AniDB_ProviderEpisode> GetTraktEpisodeMatchPreview(int animeID, string traktID)
+        {
+            return LinkingHelper.GetMatchPreviewWithOverrides(animeID, traktID, CrossRefType.TraktTV);
+        }
 
         [HttpGet("Trakt/Episode/FromTraktId/{traktID}")]
         public List<Trakt_Episode> GetAllTraktEpisodesByTraktID(string traktID)
@@ -810,61 +703,23 @@ namespace Shoko.Server
                 return new List<Trakt_Episode>();
             }
         }
-
-        [HttpGet("WebCache/CrossRef/Trakt/{animeID}/{isAdmin}")]
-        public List<Azure_CrossRef_AniDB_Trakt> GetTraktCrossRefWebCache(int animeID, bool isAdmin)
+        [HttpPost("Trakt/CrossRef")]
+        public string LinkAniDBTrakt(CL_CrossRef_AniDB_Provider link)
         {
             try
             {
-                if (isAdmin)
-                    return AzureWebAPI.Admin_Get_CrossRefAniDBTrakt(animeID);
-                else
-                    return AzureWebAPI.Get_CrossRefAniDBTrakt(animeID);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return new List<Azure_CrossRef_AniDB_Trakt>();
-            }
-        }
-
-        [HttpPost("Trakt/CrossRef/{animeID}/{aniEpType}/{aniEpNumber}/{traktID}/{seasonNumber}/{traktEpNumber}/{crossRef_AniDB_TraktV2ID?}")]
-        public string LinkAniDBTrakt(int animeID, int aniEpType, int aniEpNumber, string traktID, int seasonNumber,
-            int traktEpNumber, int? crossRef_AniDB_TraktV2ID)
-        {
-            try
-            {
-                if (crossRef_AniDB_TraktV2ID.HasValue)
+                if (Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIdAndProvider(CrossRefType.TraktTV, link.AnimeID, link.CrossRefID) != null && link.IsAdditive)
                 {
-                    CrossRef_AniDB_TraktV2 xrefTemp =
-                        Repo.Instance.CrossRef_AniDB_TraktV2.GetByID(crossRef_AniDB_TraktV2ID.Value);
-                    // delete the existing one if we are updating
-                    TraktTVHelper.RemoveLinkAniDBTrakt(xrefTemp.AnimeID, (EpisodeType) xrefTemp.AniDBStartEpisodeType,
-                        xrefTemp.AniDBStartEpisodeNumber,
-                        xrefTemp.TraktID, xrefTemp.TraktSeasonNumber, xrefTemp.TraktStartEpisodeNumber);
-                }
-
-                CrossRef_AniDB_TraktV2 xref = Repo.Instance.CrossRef_AniDB_TraktV2.GetByTraktID(traktID, seasonNumber,
-                    traktEpNumber, animeID,
-                    aniEpType,
-                    aniEpNumber);
-                if (xref != null)
-                {
-                    string msg = string.Format("You have already linked Anime ID {0} to this Trakt show/season/ep",
-                        xref.AnimeID);
-                    SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(xref.AnimeID);
+                    string msg = $"You have already linked Anime ID {link.AnimeID} to this Trakt show/season/ep";
+                    SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(link.AnimeID);
                     if (anime != null)
-                    {
-                        msg = string.Format("You have already linked Anime {0} ({1}) to this Trakt show/season/ep",
-                            anime.MainTitle,
-                            xref.AnimeID);
-                    }
+                        msg = $"You have already linked Anime {anime.MainTitle} ({link.AnimeID}) to this Trakt show/season/ep";
                     return msg;
                 }
 
-                return TraktTVHelper.LinkAniDBTrakt(animeID, (EpisodeType) aniEpType, aniEpNumber, traktID,
-                    seasonNumber,
-                    traktEpNumber, false);
+                // we don't need to proactively remove the link here anymore, as all links are removed when it is not marked as additive
+                CommandQueue.Queue.Instance.Add(new CmdTraktLinkAniDB(link.AnimeID, link.CrossRefID, link.IsAdditive));
+                return string.Empty;
             }
             catch (Exception ex)
             {
@@ -873,12 +728,30 @@ namespace Shoko.Server
             }
         }
 
-        [HttpGet("Trakt/CrossRef/{animeID}")]
-        public List<CrossRef_AniDB_TraktV2> GetTraktCrossRefV2(int animeID)
+
+        [HttpPost("Trakt/CrossRef/Episode/{aniDBID}/{traktEpId}")]
+        public string LinkAniDBTraktEpisode(int aniDBID, int traktEpId)
         {
             try
             {
-                return Repo.Instance.CrossRef_AniDB_TraktV2.GetByAnimeID(animeID).Cast<CrossRef_AniDB_TraktV2>().ToList();
+                TraktTVHelper.LinkAniDBTraktEpisode(aniDBID, traktEpId);
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return ex.Message;
+            }
+        }
+
+
+
+        [HttpGet("Trakt/CrossRef/Episode/{animeID}")]
+        public List<CrossRef_AniDB_ProviderEpisode> GetTraktCrossRefEpisode(int animeID)
+        {
+            try
+            {
+                return Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeID, CrossRefType.TraktTV).SelectMany(a => a.EpisodesListOverride.Episodes).ToList();
             }
             catch (Exception ex)
             {
@@ -887,19 +760,7 @@ namespace Shoko.Server
             }
         }
 
-        [HttpGet("Trakt/CrossRef/Episode/{animeID}")]
-        public List<CrossRef_AniDB_Trakt_Episode> GetTraktCrossRefEpisode(int animeID)
-        {
-            try
-            {
-                return Repo.Instance.CrossRef_AniDB_Trakt_Episode.GetByAnimeID(animeID);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return null;
-            }
-        }
+     
 
         [HttpGet("Trakt/Search/{criteria}")]
         public List<CL_TraktTVShowResponse> SearchTrakt(string criteria)
@@ -931,23 +792,9 @@ namespace Shoko.Server
                 if (ser == null) return "Could not find Series for Anime!";
 
                 // check if there are default images used associated
-                List<AniDB_Anime_DefaultImage> images = Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(animeID);
-                foreach (AniDB_Anime_DefaultImage image in images)
-                {
-                    if (image.ImageParentType == (int) ImageEntityType.Trakt_Fanart ||
-                        image.ImageParentType == (int) ImageEntityType.Trakt_Poster)
-                    {
-                        Repo.Instance.AniDB_Anime_DefaultImage.Delete(image.AniDB_Anime_DefaultImageID);
-                    }
-                }
-
-                foreach (CrossRef_AniDB_TraktV2 xref in Repo.Instance.CrossRef_AniDB_TraktV2.GetByAnimeID(animeID))
-                {
-                    TraktTVHelper.RemoveLinkAniDBTrakt(animeID, (EpisodeType) xref.AniDBStartEpisodeType,
-                        xref.AniDBStartEpisodeNumber,
-                        xref.TraktID, xref.TraktSeasonNumber, xref.TraktStartEpisodeNumber);
-                }
-
+                Repo.Instance.AniDB_Anime_DefaultImage.FindAndDelete(() => Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(animeID).Where(a => a.ImageParentType == (int)ImageEntityType.Trakt_Fanart || a.ImageParentType == (int)ImageEntityType.Trakt_Poster).ToList());
+                TraktTVHelper.RemoveAllAniDBTraktLinks(animeID, true);
+                
                 return string.Empty;
             }
             catch (Exception ex)
@@ -957,30 +804,18 @@ namespace Shoko.Server
             }
         }
 
-        [HttpDelete("Trakt/CrossRef/{animeID}/{aniEpType}/{aniEpNumber}/{traktID}/{traktSeasonNumber}/{traktEpNumber}")]
-        public string RemoveLinkAniDBTrakt(int animeID, int aniEpType, int aniEpNumber, string traktID,
-            int traktSeasonNumber,
-            int traktEpNumber)
+        [HttpDelete("Trakt/CrossRef")]
+        public string RemoveLinkAniDBTrakt(CL_CrossRef_AniDB_Provider link)
         {
             try
             {
-                SVR_AnimeSeries ser = Repo.Instance.AnimeSeries.GetByAnimeID(animeID);
+                SVR_AnimeSeries ser = Repo.Instance.AnimeSeries.GetByAnimeID(link.AnimeID);
 
                 if (ser == null) return "Could not find Series for Anime!";
 
                 // check if there are default images used associated
-                List<AniDB_Anime_DefaultImage> images = Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(animeID);
-                foreach (AniDB_Anime_DefaultImage image in images)
-                {
-                    if (image.ImageParentType == (int) ImageEntityType.Trakt_Fanart ||
-                        image.ImageParentType == (int) ImageEntityType.Trakt_Poster)
-                    {
-                        Repo.Instance.AniDB_Anime_DefaultImage.Delete(image.AniDB_Anime_DefaultImageID);
-                    }
-                }
-
-                TraktTVHelper.RemoveLinkAniDBTrakt(animeID, (EpisodeType) aniEpType, aniEpNumber,
-                    traktID, traktSeasonNumber, traktEpNumber);
+                Repo.Instance.AniDB_Anime_DefaultImage.FindAndDelete(() => Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(link.AnimeID).Where(a => a.ImageParentType == (int)ImageEntityType.Trakt_Fanart || a.ImageParentType == (int)ImageEntityType.Trakt_Poster).ToList());
+                TraktTVHelper.RemoveLinkAniDBTrakt(link.AnimeID, link.CrossRefID);
 
                 return string.Empty;
             }
@@ -990,6 +825,34 @@ namespace Shoko.Server
                 return ex.Message;
             }
         }
+
+        [HttpDelete("Trakt/CrossRef/Episode/{aniDBEpisodeID}/{traktEpisodeID}")]
+        public string RemoveLinkAniDBTraktEpisode(int aniDBEpisodeID, string traktEpisodeID)
+        {
+            try
+            {
+                AniDB_Episode ep = Repo.Instance.AniDB_Episode.GetByEpisodeID(aniDBEpisodeID);
+
+                if (ep == null) return "Could not find Episode";
+
+                using (var upd = Repo.Instance.CrossRef_AniDB_Provider.BeginAddOrUpdate(() => Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(ep.AnimeID, CrossRefType.TraktTV).FirstOrDefault(a => a.EpisodesListOverride.GetByProviderId(traktEpisodeID) != null)))
+                {
+                    if (!upd.IsUpdate)
+                        return "Could not find Link!";
+                    upd.Entity.EpisodesListOverride.DeleteFromProviderEpisodeId(traktEpisodeID);
+                    if (upd.Entity.EpisodesListOverride.NeedPersitance)
+                        upd.Commit();
+                }
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, ex.ToString());
+                return ex.Message;
+            }
+        }
+
+
 
         [HttpGet("Trakt/Seasons/{traktID}")]
         public List<int> GetSeasonNumbersForTrakt(string traktID)
@@ -1119,11 +982,8 @@ namespace Shoko.Server
 
                 SVR_AnimeSeries ser = Repo.Instance.AnimeSeries.GetByAnimeID(animeID);
                 if (ser == null) return "Could not find Anime Series";
+                CommandQueue.Queue.Instance.Add(new CmdTraktSyncCollectionSeries(ser.AnimeSeriesID,ser.GetSeriesName()));
 
-                CommandRequest_TraktSyncCollectionSeries cmd =
-                    new CommandRequest_TraktSyncCollectionSeries(ser.AnimeSeriesID,
-                        ser.GetSeriesName());
-                cmd.Save();
 
                 return string.Empty;
             }
@@ -1155,17 +1015,17 @@ namespace Shoko.Server
         }
 
         [HttpGet("Trakt/CrossRef")]
-        public List<CrossRef_AniDB_TraktV2> GetAllTraktCrossRefs()
+        public List<CL_CrossRef_AniDB_Provider> GetAllTraktCrossRefs()
         {
             try
             {
-                return Repo.Instance.CrossRef_AniDB_TraktV2.GetAll().Cast<CrossRef_AniDB_TraktV2>().ToList();
+                return Repo.Instance.CrossRef_AniDB_Provider.GetByType(CrossRefType.TraktTV).Select(a => a.ToClient()).ToList();
             }
             catch (Exception ex)
             {
                 logger.Error(ex, ex.ToString());
             }
-            return new List<CrossRef_AniDB_TraktV2>();
+            return new List<CL_CrossRef_AniDB_Provider>();
         }
 
         [HttpGet("Trakt/Comment/{animeID}")]
@@ -1231,99 +1091,6 @@ namespace Shoko.Server
             {
                 logger.Error(ex, "Error in GetTraktDeviceCode: " + ex.ToString());
                 return null;
-            }
-        }
-
-        #endregion
-
-        #region Other Cross Refs
-
-        [HttpGet("WebCache/CrossRef/Other/{animeID}/{crossRefType}")]
-        public CL_CrossRef_AniDB_Other_Response GetOtherAnimeCrossRefWebCache(int animeID, int crossRefType)
-        {
-            try
-            {
-                return AzureWebAPI.Get_CrossRefAniDBOther(animeID, (CrossRefType) crossRefType);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return null;
-            }
-        }
-
-        [HttpGet("Other/CrossRef/{animeID}/{crossRefType}")]
-        public CrossRef_AniDB_Other GetOtherAnimeCrossRef(int animeID, int crossRefType)
-        {
-            try
-            {
-                return Repo.Instance.CrossRef_AniDB_Other.GetByAnimeIDAndType(animeID, (CrossRefType) crossRefType);
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return null;
-            }
-        }
-
-        [HttpPost("Other/CrossRef/{animeID}/{id}/{crossRefType}")]
-        public string LinkAniDBOther(int animeID, int movieID, int crossRefType)
-        {
-            try
-            {
-                CrossRefType xrefType = (CrossRefType) crossRefType;
-
-                switch (xrefType)
-                {
-                    case CrossRefType.MovieDB:
-                        MovieDBHelper.LinkAniDBMovieDB(animeID, movieID, false);
-                        break;
-                }
-
-                return string.Empty;
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return ex.Message;
-            }
-        }
-
-        [HttpDelete("Other/CrossRef/{animeID}/{crossRefType}")]
-        public string RemoveLinkAniDBOther(int animeID, int crossRefType)
-        {
-            try
-            {
-                SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(animeID);
-
-                if (anime == null) return "Could not find Anime!";
-
-                CrossRefType xrefType = (CrossRefType) crossRefType;
-                switch (xrefType)
-                {
-                    case CrossRefType.MovieDB:
-
-                        // check if there are default images used associated
-                        List<AniDB_Anime_DefaultImage> images =
-                            Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeID(animeID);
-                        foreach (AniDB_Anime_DefaultImage image in images)
-                        {
-                            if (image.ImageParentType == (int) ImageEntityType.MovieDB_FanArt ||
-                                image.ImageParentType == (int) ImageEntityType.MovieDB_Poster)
-                            {
-                                Repo.Instance.AniDB_Anime_DefaultImage.Delete(image.AniDB_Anime_DefaultImageID);
-                            }
-                        }
-                        MovieDBHelper.RemoveLinkAniDBMovieDB(animeID);
-                        break;
-                }
-
-                return string.Empty;
-            }
-            catch (Exception ex)
-            {
-                logger.Error(ex, ex.ToString());
-                return ex.Message;
             }
         }
 

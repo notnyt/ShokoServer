@@ -8,18 +8,19 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Timers;
-using AniDBAPI;
-using AniDBAPI.Commands;
 using NLog;
 using Shoko.Commons.Properties;
 using Shoko.Models.Enums;
 using Shoko.Models.Interfaces;
 using Shoko.Models.Server;
-using Shoko.Server.Commands;
-using Shoko.Server.Databases;
+using Shoko.Server.CommandQueue.Commands.AniDB;
+using Shoko.Server.CommandQueue.Commands.Image;
 using Shoko.Server.Extensions;
 using Shoko.Server.Models;
+using Shoko.Server.Providers.AniDB.Commands;
+using Shoko.Server.Providers.AniDB.Raws;
 using Shoko.Server.Repositories;
+using Shoko.Server.Settings;
 using Timer = System.Timers.Timer;
 
 namespace Shoko.Server.Providers.AniDB
@@ -53,6 +54,10 @@ namespace Shoko.Server.Providers.AniDB
         private bool _isHttpBanned;
         private bool _isUdpBanned;
 
+        public TimeSpan UdpBanRetryTime => UdpBanTime.Value.AddMilliseconds(udpBanResetTimer.Interval).Subtract(DateTime.Now);
+
+        public TimeSpan HttpBanRetryTime => HttpBanTime.Value.AddMilliseconds(httpBanResetTimer.Interval).Subtract(DateTime.Now);
+
         public bool IsHttpBanned
         {
             get => _isHttpBanned;
@@ -80,6 +85,7 @@ namespace Shoko.Server.Providers.AniDB
                         httpBanResetTimer.Stop();
                         logger.Info("HTTP ban timer stopped. Resuming queue if not paused.");
                         // Skip if paused
+                        /* TODO NEED TO REDO THIS, Queue supports for prequisites now.
                         if (!ShokoService.CmdProcessorGeneral.Paused)
                         {
                             // Needs to have something to do first
@@ -89,14 +95,14 @@ namespace Shoko.Server.Providers.AniDB
                                 // with handling for problems
                                 ShokoService.CmdProcessorGeneral.NotifyOfNewCommand();
                             }
-                        }
+                        }*/
                     }
                     if (!IsUdpBanned)
                     {
                         ServerInfo.Instance.IsBanned = false;
                         ServerInfo.Instance.BanOrigin = string.Empty;
                         ServerInfo.Instance.BanReason = string.Empty;
-                  }
+                    }
                 }
             }
         }
@@ -127,17 +133,18 @@ namespace Shoko.Server.Providers.AniDB
                     {
                         udpBanResetTimer.Stop();
                         logger.Info("UDP ban timer stopped. Resuming if not Paused");
-                        // Skip if paused
-                        if (!ShokoService.CmdProcessorGeneral.Paused)
-                        {
-                            // Needs to have something to do first
-                            if (ShokoService.CmdProcessorGeneral.QueueCount > 0)
-                            {
-                                // Not really a new command, but this will start the queue if it's not running,
-                                // with handling for problems
-                                ShokoService.CmdProcessorGeneral.NotifyOfNewCommand();
-                            }
-                        }
+                        /* TODO NEED TO REDO THIS, Queue supports for prequisites now.
+        // Skip if paused
+        if (!ShokoService.CmdProcessorGeneral.Paused)
+        {
+            // Needs to have something to do first
+            if (ShokoService.CmdProcessorGeneral.QueueCount > 0)
+            {
+                // Not really a new command, but this will start the queue if it's not running,
+                // with handling for problems
+                ShokoService.CmdProcessorGeneral.NotifyOfNewCommand();
+            }
+        }*/
                     }
                     if (!IsHttpBanned)
                     {
@@ -189,8 +196,8 @@ namespace Shoko.Server.Providers.AniDB
             ExtendPauseSecs = secsToPause;
             ExtendPauseReason = pauseReason;
             ServerInfo.Instance.ExtendedPauseString = string.Format(Resources.AniDB_Paused,
-                secsToPause,
-                pauseReason);
+            secsToPause,
+            pauseReason);
             ServerInfo.Instance.HasExtendedPause = true;
         }
 
@@ -249,16 +256,20 @@ namespace Shoko.Server.Providers.AniDB
             logoutTimer?.Stop();
             logoutTimer = null;
             if (soUdp == null) return;
-            try{
-                if (soUdp.Connected) {
+            try
+            {
+                if (soUdp.Connected)
+                {
                     soUdp.Shutdown(SocketShutdown.Both);
                     soUdp.Disconnect(false);
                 }
             }
-            catch (SocketException ex) {
+            catch (SocketException ex)
+            {
                 logger.Error(ex.ToString(), $"Failed to Shutdown and Disconnect the connection to AniDB: {0}");
             }
-            finally {
+            finally
+            {
                 logger.Info("CLOSING ANIDB CONNECTION...");
                 soUdp.Close();
                 logger.Info("CLOSED ANIDB CONNECTION");
@@ -370,7 +381,7 @@ namespace Shoko.Server.Providers.AniDB
             logger.Trace("udp command: {0}", msg);
             SetWaitingOnResponse(true);
             enHelperActivityType ev = login.Process(ref soUdp, ref remoteIpEndPoint, curSessionID,
-                new UnicodeEncoding(true, false));
+            new UnicodeEncoding(true, false));
             SetWaitingOnResponse(false);
 
             if (login.errorOccurred)
@@ -439,9 +450,7 @@ namespace Shoko.Server.Providers.AniDB
 
                     if (ServerSettings.Instance.AniDb.DownloadReleaseGroups)
                     {
-                        CommandRequest_GetReleaseGroup cmdRelgrp =
-                            new CommandRequest_GetReleaseGroup(getInfoCmd.fileInfo.GroupID, false);
-                        cmdRelgrp.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdAniDBGetReleaseGroup(getInfoCmd.fileInfo.GroupID, false));
                     }
 
 
@@ -457,7 +466,7 @@ namespace Shoko.Server.Providers.AniDB
             return null;
         }
 
-        public void GetMyListFileStatus(int aniDBFileID)
+        public void GetMyListFileStatus(int fileID)
         {
             if (!ServerSettings.Instance.AniDb.MyList_ReadWatched) return;
 
@@ -466,24 +475,24 @@ namespace Shoko.Server.Providers.AniDB
             lock (lockAniDBConnections)
             {
                 AniDBCommand_GetMyListFileInfo cmdGetFileStatus = new AniDBCommand_GetMyListFileInfo();
-                cmdGetFileStatus.Init(aniDBFileID);
+                cmdGetFileStatus.Init(fileID);
                 SetWaitingOnResponse(true);
                 enHelperActivityType ev = cmdGetFileStatus.Process(ref soUdp, ref remoteIpEndPoint, curSessionID,
                     new UnicodeEncoding(true, false));
                 SetWaitingOnResponse(false);
                 switch (ev)
                 {
-                        case enHelperActivityType.Banned_555:
-                            logger.Error("Recieved ban on trying to get MyList stats for file");
-                            return;
-                        // Ignore no info in MyList for file
-                        case enHelperActivityType.NoSuchMyListFile: return;
-                        case enHelperActivityType.LoginRequired:
-                            logger.Error("Not logged in to AniDB");
-                            return;
+                    case enHelperActivityType.Banned_555:
+                        logger.Error("Recieved ban on trying to get MyList stats for file");
+                        return;
+                    // Ignore no info in MyList for file
+                    case enHelperActivityType.NoSuchMyListFile: return;
+                    case enHelperActivityType.LoginRequired:
+                        logger.Error("Not logged in to AniDB");
+                        return;
                 }
                 if (cmdGetFileStatus.MyListFile?.WatchedDate == null) return;
-                var aniFile = Repo.Instance.AniDB_File.GetByFileID(aniDBFileID);
+                var aniFile = Repo.Instance.AniDB_File.GetByID(fileID);
                 var vids = aniFile.EpisodeIDs.SelectMany(a => Repo.Instance.VideoLocal.GetByAniDBEpisodeID(a)).Where(a => a != null).ToList();
                 foreach (var vid in vids)
                 {
@@ -617,10 +626,7 @@ namespace Shoko.Server.Providers.AniDB
                 {
                     // Run synchronously, but still do all of the stuff with Trakt and whatnot
                     // We are skipping the watched state settings, as we are setting them here
-                    CommandRequest_AddFileToMyList addcmd = new CommandRequest_AddFileToMyList(hash.ED2KHash, false);
-                    // Initialize private parts
-                    addcmd.LoadFromDBCommand(addcmd.ToDatabaseObject());
-                    addcmd.ProcessCommand();
+                    new CmdAniDBAddFileToMyList(hash.ED2KHash, false).Run();
                 }
             }
         }
@@ -630,9 +636,8 @@ namespace Shoko.Server.Providers.AniDB
         /// </summary>
         /// <param name="animeID"></param>
         /// <param name="episodeNumber"></param>
-        /// <param name="episodeType"></param>
         /// <param name="watched"></param>
-        public void UpdateMyListFileStatus(IHash hash, int animeID, int episodeNumber, EpisodeType episodeType, bool watched, DateTime? watchedDate = null)
+        public void UpdateMyListFileStatus(IHash hash, int animeID, int episodeNumber, bool watched, DateTime? watchedDate = null)
         {
             if (!ServerSettings.Instance.AniDb.MyList_AddFiles) return;
 
@@ -643,19 +648,7 @@ namespace Shoko.Server.Providers.AniDB
                 if (watched && watchedDate == null) watchedDate = DateTime.Now;
 
                 AniDBCommand_UpdateFile cmdUpdateFile = new AniDBCommand_UpdateFile();
-                string episodeData = "";
-                if (episodeType == EpisodeType.Credits)
-                    episodeData = "C";
-                else if (episodeType == EpisodeType.Special)
-                    episodeData = "S";
-                else if (episodeType == EpisodeType.Trailer)
-                    episodeData = "T";
-                else if (episodeType == EpisodeType.Parody)
-                    episodeData = "P";
-                else if (episodeType == EpisodeType.Other)
-                    episodeData = "O";
-                episodeData += episodeNumber;
-                cmdUpdateFile.Init(hash, animeID, episodeData, watched, watchedDate);
+                cmdUpdateFile.Init(hash, animeID, episodeNumber, watched, watchedDate);
                 SetWaitingOnResponse(true);
                 var ev = cmdUpdateFile.Process(ref soUdp, ref remoteIpEndPoint, curSessionID,
                     new UnicodeEncoding(true, false));
@@ -665,10 +658,7 @@ namespace Shoko.Server.Providers.AniDB
                 {
                     // Run synchronously, but still do all of the stuff with Trakt and whatnot
                     // We are skipping the watched state settings, as we are setting them here
-                    CommandRequest_AddFileToMyList addcmd = new CommandRequest_AddFileToMyList(hash.ED2KHash, false);
-                    // Initialize private parts
-                    addcmd.LoadFromDBCommand(addcmd.ToDatabaseObject());
-                    addcmd.ProcessCommand();
+                    new CmdAniDBAddFileToMyList(hash.ED2KHash, false).Run();
                 }
             }
         }
@@ -705,7 +695,7 @@ namespace Shoko.Server.Providers.AniDB
             return (null, watchedDate);
         }
 
-        public (int?, DateTime?) AddFileToMyList(int animeID, int episodeNumber, EpisodeType episodeType, DateTime? watchedDate, ref AniDBFile_State? state)
+        public (int?, DateTime?) AddFileToMyList(int animeID, int episodeNumber, DateTime? watchedDate, ref AniDBFile_State? state)
         {
             if (!ServerSettings.Instance.AniDb.MyList_AddFiles) return (null, watchedDate);
             // It's easier to compare a change if we return the original watch date instead of null, since null means unwatched
@@ -962,7 +952,7 @@ namespace Shoko.Server.Providers.AniDB
             }
 
             if (ev != enHelperActivityType.GotGroup || getCmd.Group == null) return;
-            using (var upd = Repo.Instance.AniDB_ReleaseGroup.BeginAddOrUpdate(() => Repo.Instance.AniDB_ReleaseGroup.GetByID(groupID)))
+            using (var upd = Repo.Instance.AniDB_ReleaseGroup.BeginAddOrUpdate(groupID))
             {
                 upd.Entity.Populate_RA(getCmd.Group);
                 upd.Commit();
@@ -1006,7 +996,7 @@ namespace Shoko.Server.Providers.AniDB
                 SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(animeID);
                 if (anime != null)
                 {
-                    using (var upd = Repo.Instance.AniDB_Anime.BeginAddOrUpdate(() => anime))
+                    using (var upd = Repo.Instance.AniDB_Anime.BeginAddOrUpdate(anime))
                     {
                         upd.Entity.LatestEpisodeNumber = getCmd.GrpStatusCollection.LatestEpisodeNumber;
                         anime = upd.Commit();
@@ -1018,9 +1008,7 @@ namespace Shoko.Server.Providers.AniDB
                         getCmd.GrpStatusCollection.LatestEpisodeNumber);
                     if (eps.Count == 0)
                     {
-                        CommandRequest_GetAnimeHTTP cr_anime =
-                            new CommandRequest_GetAnimeHTTP(animeID, true, false, 0);
-                        cr_anime.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdAniDBGetAnimeHTTP(animeID, true, false, 0));
                     }
                     // update the missing episode stats on groups and children
                     SVR_AnimeSeries series = Repo.Instance.AnimeSeries.GetByAnimeID(animeID);
@@ -1036,9 +1024,7 @@ namespace Shoko.Server.Providers.AniDB
                         getCmd.GrpStatusCollection.LatestEpisodeNumber);
                     if (eps.Count == 0)
                     {
-                        CommandRequest_GetAnimeHTTP cr_anime =
-                            new CommandRequest_GetAnimeHTTP(animeID, true, false);
-                        cr_anime.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdAniDBGetAnimeHTTP(animeID, true, false));
                     }
                     // update the missing episode stats on groups and children
                     SVR_AnimeSeries series = Repo.Instance.AnimeSeries.GetByAnimeID(animeID);
@@ -1089,7 +1075,7 @@ namespace Shoko.Server.Providers.AniDB
 
             if (ev == enHelperActivityType.GotReview && cmd.ReviewInfo != null)
             {
-                using (var upd = Repo.Instance.AniDB_Review.BeginAddOrUpdate(()=>Repo.Instance.AniDB_Review.GetByID(reviewID)))
+                using (var upd = Repo.Instance.AniDB_Review.BeginAddOrUpdate(reviewID))
                 {
                     upd.Entity.Populate_RA(cmd.ReviewInfo);
                     return upd.Commit();
@@ -1127,7 +1113,7 @@ namespace Shoko.Server.Providers.AniDB
             VoteAnime(animeID, -1, voteType);
         }
         public SVR_AniDB_Anime GetAnimeInfoHTTP(int animeID, bool forceRefresh,
-            bool downloadRelations, int relDepth = 0)
+        bool downloadRelations, int relDepth = 0)
         {
             //if (!Login()) return null;
 
@@ -1165,7 +1151,7 @@ namespace Shoko.Server.Providers.AniDB
             {
                 return SaveResultsForAnimeXML(animeID, downloadRelations || ServerSettings.Instance.AutoGroupSeries, true, getAnimeCmd, relDepth);
                 //this endpoint is not working, so comenting...
-/*
+                /*
                 if (forceRefresh)
                 {
                     CommandRequest_Azure_SendAnimeFull cmdAzure = new CommandRequest_Azure_SendAnimeFull(anime.AnimeID);
@@ -1185,7 +1171,7 @@ namespace Shoko.Server.Providers.AniDB
             logger.Trace("cmdResult.Anime: {0}", getAnimeCmd.Anime);
 
             SVR_AniDB_Anime anime;
-            using (var upd = Repo.Instance.AniDB_Anime.BeginAddOrUpdate(() => Repo.Instance.AniDB_Anime.GetByID(animeID)))
+            using (var upd = Repo.Instance.AniDB_Anime.BeginAddOrUpdate(animeID))
             {
                 if (!upd.Entity.PopulateFromHTTP(getAnimeCmd.Anime, getAnimeCmd.Episodes, getAnimeCmd.Titles,
                     getAnimeCmd.Categories, getAnimeCmd.Tags,
@@ -1199,8 +1185,7 @@ namespace Shoko.Server.Providers.AniDB
                 // All images from AniDB are downloaded in this
                 if (validateImages)
                 {
-                    var cmd = new CommandRequest_DownloadAniDBImages(upd.Entity.AnimeID, false);
-                    cmd.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdImageDownloadAllAniDb(upd.Entity.AnimeID, false));
                 }
 
                 anime = upd.Commit();
@@ -1209,7 +1194,7 @@ namespace Shoko.Server.Providers.AniDB
             SVR_AnimeSeries ser = Repo.Instance.AnimeSeries.GetByAnimeID(animeID);
             if (ser != null)
             {
-                using (var upd = Repo.Instance.AnimeSeries.BeginAddOrUpdate(() => ser))
+                using (var upd = Repo.Instance.AnimeSeries.BeginAddOrUpdate(ser))
                 {
                     upd.Entity.CreateAnimeEpisodes();
                     upd.Commit();

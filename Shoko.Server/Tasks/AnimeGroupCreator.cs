@@ -11,6 +11,7 @@ using Shoko.Server.Extensions;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories;
 using Shoko.Server.Repositories.Repos;
+using Shoko.Server.Settings;
 
 namespace Shoko.Server.Tasks
 {
@@ -52,7 +53,7 @@ namespace Shoko.Server.Tasks
         {
             DateTime now = DateTime.Now;
             SVR_AnimeGroup tempGroup;
-            using (var upd = Repo.Instance.AnimeGroup.BeginAddOrUpdate(() => Repo.Instance.AnimeGroup.GetByID(0)))
+            using (var upd = Repo.Instance.AnimeGroup.BeginAddOrUpdate(0))
             {
                 upd.Entity.GroupName = TempGroupName;
                 upd.Entity.Description = TempGroupName;
@@ -187,12 +188,12 @@ namespace Shoko.Server.Tasks
             foreach (SVR_AnimeSeries s in seriesList)
             {
                 SVR_AnimeGroup grp;
-                using (var upd = Repo.Instance.AnimeGroup.BeginAddOrUpdate(() => null))
+                using (var upd = Repo.Instance.AnimeGroup.BeginAdd())
                 {
-                    upd.Entity.Populate_RA(s,now);
+                    upd.Entity.Populate_RA(s, now);
                     grp = upd.Commit((false, false, false));
                 }
-                using (var upd = Repo.Instance.AnimeSeries.BeginAddOrUpdate(() => Repo.Instance.AnimeSeries.GetByID(s.AnimeSeriesID)))
+                using (var upd = Repo.Instance.AnimeSeries.BeginAddOrUpdate(s))
                 {
                     upd.Entity.AnimeGroupID = grp.AnimeGroupID;
                     upd.Commit((false, false, true, false));
@@ -232,12 +233,12 @@ namespace Shoko.Server.Tasks
                 int mainAnimeId = groupAndSeries.Key;
                 SVR_AnimeSeries mainSeries = groupAndSeries.FirstOrDefault(series => series.AniDB_ID == mainAnimeId);
                 SVR_AnimeGroup grp;
-                using (var upd = Repo.Instance.AnimeGroup.BeginAddOrUpdate(() => null))
+                using (var upd = Repo.Instance.AnimeGroup.BeginAdd())
                 {
-                    CreateAnimeGroup_RA(upd.Entity,mainSeries, mainAnimeId, now);
+                    CreateAnimeGroup_RA(upd.Entity, mainSeries, mainAnimeId, now);
                     grp = upd.Commit((false, false, false));
                 }
-                using (var upd = Repo.Instance.AnimeSeries.BeginAddOrUpdate(() => Repo.Instance.AnimeSeries.GetByID(mainSeries.AnimeSeriesID)))
+                using (var upd = Repo.Instance.AnimeSeries.BeginAddOrUpdate(mainSeries))
                 {
                     upd.Entity.AnimeGroupID = grp.AnimeGroupID;
                     upd.Commit((false, false, true, false));
@@ -380,17 +381,14 @@ namespace Shoko.Server.Tasks
         {
 
 
-            bool cmdProcGeneralPaused = ShokoService.CmdProcessorGeneral.Paused;
-            bool cmdProcHasherPaused = ShokoService.CmdProcessorHasher.Paused;
-            bool cmdProcImagesPaused = ShokoService.CmdProcessorImages.Paused;
 
+
+            bool wasrunning = CommandQueue.Queue.Instance.Running;
             try
             {
                 // Pause queues
-                ShokoService.CmdProcessorGeneral.Paused = true;
-                ShokoService.CmdProcessorHasher.Paused = true;
-                ShokoService.CmdProcessorImages.Paused = true;
-
+                CommandQueue.Queue.Instance.Stop();
+ 
                 _log.Info("Beginning re-creation of all groups");
 
 
@@ -458,9 +456,8 @@ namespace Shoko.Server.Tasks
             finally
             {
                 // Un-pause queues (if they were previously running)
-                ShokoService.CmdProcessorGeneral.Paused = cmdProcGeneralPaused;
-                ShokoService.CmdProcessorHasher.Paused = cmdProcHasherPaused;
-                ShokoService.CmdProcessorImages.Paused = cmdProcImagesPaused;
+                if (wasrunning)
+                    CommandQueue.Queue.Instance.Start();
             }
         }
 

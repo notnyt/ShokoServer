@@ -1,6 +1,9 @@
 ﻿using Shoko.Server;
 using System;
 using NLog;
+using Shoko.Server.CommandQueue;
+using Shoko.Server.Settings;
+using Shoko.Server.Utilities;
 
 namespace Shoko.CLI
 {
@@ -45,14 +48,10 @@ namespace Shoko.CLI
                     Console.WriteLine("Startup failed! Error message: " + ServerState.Instance.StartupFailedMessage);
                 }
             };
-
-            ShokoService.CmdProcessorGeneral.OnQueueStateChangedEvent +=
-                ev => Console.WriteLine($"General Queue state change: {ev.QueueState.formatMessage()}");
-            ShokoService.CmdProcessorHasher.OnQueueStateChangedEvent +=
-                ev => Console.WriteLine($"Hasher Queue state change: {ev.QueueState.formatMessage()}");
-            ShokoService.CmdProcessorImages.OnQueueStateChangedEvent +=
-                ev => Console.WriteLine($"Images Queue state change: {ev.QueueState.formatMessage()}");
-
+            Queue.Instance.Subscribe((ev) =>
+            {
+                Console.WriteLine($"Queue state change: {ev.PrettyDescription.FormatMessage()}");
+            });
             while (running)
             {
                 System.Threading.Thread.Sleep(TimeSpan.FromSeconds(60));

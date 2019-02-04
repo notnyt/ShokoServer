@@ -9,6 +9,7 @@ using Shoko.Commons.Extensions;
 using Shoko.Server.Extensions;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories;
+using Shoko.Server.Utilities;
 
 namespace Shoko.Server.API.v2.Modules
 {
@@ -93,8 +94,7 @@ namespace Shoko.Server.API.v2.Modules
 
             return new Dictionary<string, object>
             {
-                {"queue", Repo.Instance.CommandRequest.GetAll().GroupBy(a => a.CommandType)
-                    .ToDictionary(a => (CommandRequestType)a.Key, a => a.Count()) },
+                {"queue", Repo.Instance.CommandRequest.GetByClasses().ToDictionary(a=>FromLastPoint(a.Key),a=>a.Value) },
                 {"file_count", file_count },
                 {"series_count", series_count },
                 {"collection_size", size },
@@ -105,6 +105,13 @@ namespace Shoko.Server.API.v2.Modules
             };
         }
 
+        private string FromLastPoint(string s)
+        {
+            int a = s.LastIndexOf(".",StringComparison.InvariantCulture);
+            if (a > 0)
+                return s.Substring(a + 1);
+            return s;
+        }
         private static readonly string[] SizeSuffixes = 
             { "bytes", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB" };
 

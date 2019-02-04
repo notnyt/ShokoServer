@@ -2,12 +2,12 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using NutzCode.InMemoryIndex;
 using Shoko.Commons.Extensions;
 using Shoko.Models.Enums;
 using Shoko.Server.Models;
 using Shoko.Server.PlexAndKodi;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories.Repos
 {
@@ -24,7 +24,7 @@ namespace Shoko.Server.Repositories.Repos
 
         internal override void EndDelete(SVR_AnimeEpisode entity, object returnFromBeginDelete, object parameters)
         {
-            Repo.Instance.AnimeEpisode_User.Delete(entity.AnimeEpisodeID);
+            Repo.Instance.AnimeEpisode_User.FindAndDelete(()=>Repo.Instance.AnimeEpisode_User.GetByEpisodeID(entity.AnimeEpisodeID));
         }
 
         internal override int SelectKey(SVR_AnimeEpisode entity)

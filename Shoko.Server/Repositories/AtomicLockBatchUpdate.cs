@@ -5,8 +5,8 @@ using System.Linq;
 using Force.DeepCloner;
 using Microsoft.EntityFrameworkCore;
 using Shoko.Commons.Extensions;
-using Shoko.Server.Databases;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories
 {
@@ -17,7 +17,7 @@ namespace Shoko.Server.Repositories
         private IDisposable _lock;
         private readonly Dictionary<T, T> _originalItems;
 
-        internal AtomicLockBatchUpdate(BaseRepository<T, TS, TT> repo, Func<List<T>> find_original_items = null, bool delete_not_updated = false)
+        internal AtomicLockBatchUpdate(BaseRepository<T, TS, TT> repo, Func<IEnumerable<T>> find_original_items = null, bool delete_not_updated = false)
         {
             _repo = repo;
             _lock = _repo.RepoLock.WriterLock();
@@ -30,6 +30,7 @@ namespace Shoko.Server.Repositories
             T value = _originalItems.Keys.FirstOrDefault(predicate) ?? Create();
             return value;
         }
+
         public T Find(Func<T, bool> predicate)
         {
             return _originalItems.Keys.FirstOrDefault(predicate);
@@ -54,7 +55,12 @@ namespace Shoko.Server.Repositories
             _references[a] = null;
             return a;
         }
-
+        public T Create(T a)
+        {
+            _repo.Provider.GetContext().SetLocalKey(a, _repo.GetNextAutoGen);
+            _references[a] = null;
+            return a;
+        }
         public List<T> Commit(TT pars = default(TT))
         {
             Dictionary<T, object> savedobjects = new Dictionary<T, object>();

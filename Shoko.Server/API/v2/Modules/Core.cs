@@ -9,18 +9,22 @@ using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using AniDBAPI;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using NLog;
 using Shoko.Models.Client;
 using Shoko.Models.Server;
 using Shoko.Server.API.v2.Models.core;
-using Shoko.Server.Commands;
+using Shoko.Server.CommandQueue.Commands.AniDB;
+using Shoko.Server.CommandQueue.Commands.Trakt;
 using Shoko.Server.Extensions;
+using Shoko.Server.Import;
 using Shoko.Server.Models;
 using Shoko.Server.PlexAndKodi;
+using Shoko.Server.Providers.AniDB;
+using Shoko.Server.Providers.TvDB;
 using Shoko.Server.Repositories;
+using Shoko.Server.Settings;
 using Shoko.Server.Utilities;
 
 namespace Shoko.Server.API.v2.Modules
@@ -319,8 +323,7 @@ namespace Shoko.Server.API.v2.Modules
         public ActionResult SyncAniDBVotes()
         {
             //TODO APIv2: Command should be split into AniDb/MAL sepereate
-            CommandRequest_SyncMyVotes cmdVotes = new CommandRequest_SyncMyVotes();
-            cmdVotes.Save();
+            CommandQueue.Queue.Instance.Add(new CmdAniDBSyncMyVotes());
             return APIStatus.OK();
         }
 
@@ -362,8 +365,7 @@ namespace Shoko.Server.API.v2.Modules
                     var xml = APIUtils.LoadAnimeHTTPFromFile(animeID);
                     if (xml == null)
                     {
-                        CommandRequest_GetAnimeHTTP cmd = new CommandRequest_GetAnimeHTTP(animeID, true, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdAniDBGetAnimeHTTP(animeID, true, false));
                         updatedAnime++;
                         continue;
                     }
@@ -371,8 +373,7 @@ namespace Shoko.Server.API.v2.Modules
                     var rawAnime = AniDBHTTPHelper.ProcessAnimeDetails(xml, animeID);
                     if (rawAnime == null)
                     {
-                        CommandRequest_GetAnimeHTTP cmd = new CommandRequest_GetAnimeHTTP(animeID, true, false);
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdAniDBGetAnimeHTTP(animeID, true, false));
                         updatedAnime++;
                     }
                 }
@@ -430,8 +431,7 @@ namespace Shoko.Server.API.v2.Modules
         {
             if (ServerSettings.Instance.TraktTv.Enabled && !string.IsNullOrEmpty(ServerSettings.Instance.TraktTv.AuthToken))
             {
-                CommandRequest_TraktSyncCollection cmd = new CommandRequest_TraktSyncCollection(true);
-                cmd.Save();
+                CommandQueue.Queue.Instance.Add(new CmdTraktSyncCollection(true));
                 return APIStatus.OK();
             }
 
@@ -473,9 +473,20 @@ namespace Shoko.Server.API.v2.Modules
         {
             try
             {
-                Repo.Instance.CrossRef_AniDB_TvDB_Episode.DeleteAllUnverifiedLinks();
-                Repo.Instance.AnimeSeries.GetAll().ToList().AsParallel().ForAll(animeseries =>
-                    TvDBLinkingHelper.GenerateTvDBEpisodeMatches(animeseries.AniDB_ID, true));
+                using (var upd = Repo.Instance.CrossRef_AniDB_Provider.BeginBatchUpdate(() => Repo.Instance.CrossRef_AniDB_Provider.GetByType(Shoko.Models.Enums.CrossRefType.TvDB)))
+                {
+                    foreach(SVR_CrossRef_AniDB_Provider p in upd)
+                    {
+                        p.EpisodesList.DeleteAllUnverifiedLinks();
+                        if (p.EpisodesList.NeedPersitance)
+                        {
+                            p.EpisodesList.Persist();
+                            upd.Update(p);
+                        }
+                    }
+                    upd.Commit();
+                }
+                Repo.Instance.AnimeSeries.GetAll().ToList().AsParallel().ForAll(animeseries => LinkingHelper.GenerateEpisodeMatches(animeseries.AniDB_ID, Shoko.Models.Enums.CrossRefType.TvDB, true));
             }
             catch (Exception e)
             {
@@ -567,27 +578,27 @@ namespace Shoko.Server.API.v2.Modules
                 var result = new List<EpisodeMatchComparison>();
                 foreach (var animeseries in list)
                 {
-                    List<CrossRef_AniDB_TvDB> tvxrefs =
-                        Repo.Instance.CrossRef_AniDB_TvDB.GetByAnimeID(animeseries.AnimeID);
-                    int tvdbID = tvxrefs.FirstOrDefault()?.TvDBID ?? 0;
-                    var matches = TvDBLinkingHelper.GetTvDBEpisodeMatches(animeseries.AnimeID, tvdbID).Select(a => (
+                    List<SVR_CrossRef_AniDB_Provider> tvxrefs =
+                        Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeseries.AnimeID,Shoko.Models.Enums.CrossRefType.TvDB);
+                    int tvdbID = int.Parse(tvxrefs.FirstOrDefault()?.CrossRefID ?? "0");
+                    var matches = LinkingHelper.GetEpisodeMatches(animeseries.AnimeID, tvdbID.ToString(), Shoko.Models.Enums.CrossRefType.TvDB).Select(a => (
                         AniDB: new AniEpSummary
                         {
                             AniDBEpisodeType = a.AniDB.EpisodeType,
                             AniDBEpisodeNumber = a.AniDB.EpisodeNumber,
                             AniDBEpisodeName = a.AniDB.GetEnglishTitle()
                         },
-                        TvDB: a.TvDB == null ? null : new TvDBEpSummary
+                        TvDB: a.Cross == null ? null : new TvDBEpSummary
                         {
-                            TvDBSeason = a.TvDB.SeasonNumber,
-                            TvDBEpisodeNumber = a.TvDB.EpisodeNumber,
-                            TvDBEpisodeName = a.TvDB.EpisodeName
+                            TvDBSeason = a.Cross.Season,
+                            TvDBEpisodeNumber = a.Cross.Number,
+                            TvDBEpisodeName = a.Cross.Title
                         })).OrderBy(a => a.AniDB.AniDBEpisodeType).ThenBy(a => a.AniDB.AniDBEpisodeNumber).ToList();
-                    var currentMatches = Repo.Instance.CrossRef_AniDB_TvDB_Episode.GetByAnimeID(animeseries.AnimeID)
+                    var currentMatches = Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(animeseries.AnimeID, Shoko.Models.Enums.CrossRefType.TvDB).SelectMany(a=>a.Episodes)
                         .Select(a =>
                         {
                             var AniDB = Repo.Instance.AniDB_Episode.GetByEpisodeID(a.AniDBEpisodeID);
-                            var TvDB = Repo.Instance.TvDB_Episode.GetByTvDBID(a.TvDBEpisodeID);
+                            var TvDB = Repo.Instance.TvDB_Episode.GetByTvDBID(int.Parse(a.ProviderEpisodeID));
                             return (AniDB: new AniEpSummary
                                 {
                                     AniDBEpisodeType = AniDB.EpisodeType,
@@ -803,7 +814,7 @@ namespace Shoko.Server.API.v2.Modules
         [HttpGet("log/get")]
         public ActionResult StartRotateLogs()
         {
-            ShokoServer.logrotator.Start();
+            LogRotator.Instance.Start();
             return APIStatus.OK();
         }
 

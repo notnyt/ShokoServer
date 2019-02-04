@@ -2,13 +2,12 @@
 using System.Collections.Generic;
 using System.Linq;
 using NLog;
-using NutzCode.InMemoryIndex;
 using Shoko.Commons.Properties;
 using Shoko.Models.Enums;
 using Shoko.Models.Server;
-using Shoko.Server.Databases;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories.Repos
 {
@@ -54,7 +53,7 @@ namespace Shoko.Server.Repositories.Repos
 
         internal override object BeginDelete(SVR_AnimeGroup entity, (bool updategrpcontractstats, bool recursive, bool verifylockedFilters) parameters)
         {
-            Repo.Instance.AnimeGroup_User.Delete(entity.AnimeGroupID);
+            Repo.Instance.AnimeGroup_User.FindAndDelete(()=>Repo.Instance.AnimeGroup_User.GetByGroupID(entity.AnimeGroupID));
             entity.DeleteFromFilters();
             return null;
         }
@@ -65,7 +64,7 @@ namespace Shoko.Server.Repositories.Repos
             if (entity.AnimeGroupParentID.HasValue && entity.AnimeGroupParentID.Value > 0 && entity.AnimeGroupParentID!=entity.AnimeGroupID)
             {
                 logger.Trace("Updating group stats by group from AnimeGroupRepository.Delete: {0}", entity.AnimeGroupParentID.Value);
-                Repo.Instance.AnimeGroup.Touch(()=>Repo.Instance.AnimeGroup.GetByID(entity.AnimeGroupParentID.Value),(false, true, true));
+                Repo.Instance.AnimeGroup.Touch(entity.AnimeGroupParentID.Value,(false, true, true));
             }
         }
 

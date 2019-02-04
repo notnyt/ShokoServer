@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
-using AniDBAPI;
 using Shoko.Models;
 using Shoko.Models.Server;
 using Shoko.Commons.Extensions;
@@ -13,15 +12,19 @@ using NLog;
 using NutzCode.CloudFileSystem;
 using NutzCode.CloudFileSystem.Plugins.LocalFileSystem;
 using Shoko.Commons;
-using Shoko.Server.Commands;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories;
-using Shoko.Server.Commands.Plex;
+
 using Shoko.Server.Extensions;
 using Shoko.Server.Plex;
 using Microsoft.AspNetCore.Http;
 using Newtonsoft.Json;
 using Microsoft.AspNetCore.Mvc;
+using Shoko.Server.CommandQueue;
+using Shoko.Server.CommandQueue.Commands;
+using Shoko.Server.CommandQueue.Commands.AniDB;
+using Shoko.Server.Import;
+using Shoko.Server.Settings;
 
 namespace Shoko.Server
 {
@@ -60,9 +63,9 @@ namespace Shoko.Server
             };
             try
             {
-                using (var upd = Repo.Instance.BookmarkedAnime.BeginAddOrUpdate(() =>  Repo.Instance.BookmarkedAnime.GetByID(contract.AnimeID)))
+                using (var upd = Repo.Instance.BookmarkedAnime.BeginAddOrUpdate(() =>  Repo.Instance.BookmarkedAnime.GetByAnimeID(contract.AnimeID)))
                 {
-                    if (contract.AnimeID != 0 && upd.Original == null)
+                    if (upd.IsNew())
                     {
                         contractRet.ErrorMessage = "Could not find existing Bookmark with ID: " +contract.AnimeID;
                         return contractRet;
@@ -89,11 +92,8 @@ namespace Shoko.Server
         {
             try
             {
-                if (!Repo.Instance.BookmarkedAnime.FindAndDelete(()=> Repo.Instance.BookmarkedAnime.GetByID(bookmarkedAnimeID)))
+                if (!Repo.Instance.BookmarkedAnime.Delete(bookmarkedAnimeID))
                     return "Bookmarked not found";
-
-                Repo.Instance.BookmarkedAnime.Delete(bookmarkedAnimeID);
-
                 return string.Empty;
             }
             catch (Exception ex)
@@ -231,23 +231,33 @@ namespace Shoko.Server
 
             try
             {
-                contract.HashQueueCount = ShokoService.CmdProcessorHasher.QueueCount;
-                contract.HashQueueState =
-                    ShokoService.CmdProcessorHasher.QueueState.formatMessage(); //Deprecated since 3.6.0.0
-                contract.HashQueueStateId = (int) ShokoService.CmdProcessorHasher.QueueState.queueState;
-                contract.HashQueueStateParams = ShokoService.CmdProcessorHasher.QueueState.extraParams;
+                contract.HashQueueCount = ServerInfo.Instance.HasherQueueCount;
+                if (ServerInfo.Instance.HasherQueueState != null)
+                {
+                    contract.HashQueueState = ServerInfo.Instance.HasherQueueState.PrettyDescription.FormatMessage(); //Deprecated since 3.6.0.0
+                    contract.HashQueueStateId = (int) ServerInfo.Instance.HasherQueueState.PrettyDescription.QueueState;
+                    contract.HashQueueStateParams = ServerInfo.Instance.HasherQueueState.PrettyDescription.ExtraParams;
+                    contract.HashQueueStatePercentage = ServerInfo.Instance.HasherQueueState.Progress;
+                }
 
-                contract.GeneralQueueCount = ShokoService.CmdProcessorGeneral.QueueCount;
-                contract.GeneralQueueState =
-                    ShokoService.CmdProcessorGeneral.QueueState.formatMessage(); //Deprecated since 3.6.0.0
-                contract.GeneralQueueStateId = (int) ShokoService.CmdProcessorGeneral.QueueState.queueState;
-                contract.GeneralQueueStateParams = ShokoService.CmdProcessorGeneral.QueueState.extraParams;
+                contract.GeneralQueueCount = ServerInfo.Instance.GeneralQueueCount;
+                if (ServerInfo.Instance.GeneralQueueState != null)
+                {
+                    contract.GeneralQueueState = ServerInfo.Instance.GeneralQueueState.PrettyDescription.FormatMessage(); //Deprecated since 3.6.0.0
+                    contract.GeneralQueueStateId = (int)ServerInfo.Instance.GeneralQueueState.PrettyDescription.QueueState;
+                    contract.GeneralQueueStateParams = ServerInfo.Instance.GeneralQueueState.PrettyDescription.ExtraParams;
+                    contract.GeneralQueueStatePercentage = ServerInfo.Instance.GeneralQueueState.Progress;
+                }
 
-                contract.ImagesQueueCount = ShokoService.CmdProcessorImages.QueueCount;
-                contract.ImagesQueueState =
-                    ShokoService.CmdProcessorImages.QueueState.formatMessage(); //Deprecated since 3.6.0.0
-                contract.ImagesQueueStateId = (int) ShokoService.CmdProcessorImages.QueueState.queueState;
-                contract.ImagesQueueStateParams = ShokoService.CmdProcessorImages.QueueState.extraParams;
+                contract.ImagesQueueCount = ServerInfo.Instance.ImagesQueueCount;
+                if (ServerInfo.Instance.ImagesQueueState != null)
+                {
+                    contract.ImagesQueueState = ServerInfo.Instance.ImagesQueueState.PrettyDescription.FormatMessage(); //Deprecated since 3.6.0.0
+                    contract.ImagesQueueStateId = (int)ServerInfo.Instance.ImagesQueueState.PrettyDescription.QueueState;
+                    contract.ImagesQueueStateParams = ServerInfo.Instance.ImagesQueueState.PrettyDescription.ExtraParams;
+                    contract.ImagesQueueStatePercentage = ServerInfo.Instance.ImagesQueueState.Progress;
+                }
+
 
                 var helper = ShokoService.AnidbProcessor;
                 if (helper.IsHttpBanned)
@@ -523,14 +533,12 @@ namespace Shoko.Server
 
                 // Web Cache
                 ServerSettings.Instance.WebCache.Address = contractIn.WebCache_Address;
-                ServerSettings.Instance.WebCache.Anonymous = contractIn.WebCache_Anonymous;
                 ServerSettings.Instance.WebCache.XRefFileEpisode_Get = contractIn.WebCache_XRefFileEpisode_Get;
                 ServerSettings.Instance.WebCache.XRefFileEpisode_Send = contractIn.WebCache_XRefFileEpisode_Send;
                 ServerSettings.Instance.WebCache.TvDB_Get = contractIn.WebCache_TvDB_Get;
                 ServerSettings.Instance.WebCache.TvDB_Send = contractIn.WebCache_TvDB_Send;
                 ServerSettings.Instance.WebCache.Trakt_Get = contractIn.WebCache_Trakt_Get;
                 ServerSettings.Instance.WebCache.Trakt_Send = contractIn.WebCache_Trakt_Send;
-                ServerSettings.Instance.WebCache.UserInfo = contractIn.WebCache_UserInfo;
 
                 // TvDB
                 ServerSettings.Instance.TvDB.AutoLink = contractIn.TvDB_AutoLink;
@@ -670,8 +678,7 @@ namespace Shoko.Server
         [HttpPost("AniDB/Vote/Sync")]
         public void SyncVotes()
         {
-            CommandRequest_SyncMyVotes cmdVotes = new CommandRequest_SyncMyVotes();
-            cmdVotes.Save();
+            CommandQueue.Queue.Instance.Add(new CmdAniDBSyncMyVotes());
         }
 
         #endregion
@@ -680,19 +687,28 @@ namespace Shoko.Server
         [HttpPost("CommandQueue/Hasher/{paused}")]
         public void SetCommandProcessorHasherPaused(bool paused)
         {
-            ShokoService.CmdProcessorHasher.Paused = paused;
+            if (paused)
+                Queue.Instance.PauseWorkTypes(WorkTypes.Hashing);
+            else
+                Queue.Instance.ResumeWorkTypes(WorkTypes.Hashing);
         }
 
         [HttpPost("CommandQueue/General/{paused}")]
         public void SetCommandProcessorGeneralPaused(bool paused)
         {
-            ShokoService.CmdProcessorGeneral.Paused = paused;
+            if (paused)
+                Queue.Instance.PauseWorkTypes(Queue.GeneralWorkTypesExceptSchedule);
+            else
+                Queue.Instance.ResumeWorkTypes(Queue.GeneralWorkTypesExceptSchedule);
         }
 
         [HttpPost("CommandQueue/Images/{paused}")]
         public void SetCommandProcessorImagesPaused(bool paused)
         {
-            ShokoService.CmdProcessorImages.Paused = paused;
+            if (paused)
+                Queue.Instance.PauseWorkTypes(WorkTypes.Image);
+            else
+                Queue.Instance.ResumeWorkTypes(WorkTypes.Image);
         }
 
         [HttpDelete("CommandQueue/Hasher")]
@@ -700,10 +716,7 @@ namespace Shoko.Server
         {
             try
             {
-                ShokoService.CmdProcessorHasher.Stop();
-
-                Repo.Instance.CommandRequest.ClearHasherQueue();
-                ShokoService.CmdProcessorHasher.Init();
+                Queue.Instance.ClearWorkTypes(WorkTypes.Hashing);
             }
             catch (Exception ex)
             {
@@ -716,10 +729,7 @@ namespace Shoko.Server
         {
             try
             {
-                ShokoService.CmdProcessorImages.Stop();
-
-                Repo.Instance.CommandRequest.ClearImageQueue();
-                ShokoService.CmdProcessorImages.Init();
+                Queue.Instance.ClearWorkTypes(WorkTypes.Image);
             }
             catch (Exception ex)
             {
@@ -732,10 +742,8 @@ namespace Shoko.Server
         {
             try
             {
-                ShokoService.CmdProcessorGeneral.Stop();
-
-                Repo.Instance.CommandRequest.ClearGeneralQueue();
-                ShokoService.CmdProcessorGeneral.Init();
+                Queue.Instance.ClearWorkTypes(Queue.GeneralWorkTypesExceptSchedule);
+                
             }
             catch (Exception ex)
             {
@@ -861,60 +869,60 @@ namespace Shoko.Server
                 switch (imgType)
                 {
                     case ImageEntityType.AniDB_Cover:
-                        SVR_AniDB_Anime anime = Repo.Instance.AniDB_Anime.GetByID(imageID);
-                        if (anime == null) return "Could not find anime";
-                        using (var upd = Repo.Instance.AniDB_Anime.BeginAddOrUpdate(() => anime))
+                        using (var upd = Repo.Instance.AniDB_Anime.BeginAddOrUpdate(imageID))
                         {
+                            if (upd.IsNew())
+                                return "Could not find anime";
                             upd.Entity.ImageEnabled = enabled ? 1 : 0;
                             upd.Commit();
                         }
                         break;
 
                     case ImageEntityType.TvDB_Banner:
-                        TvDB_ImageWideBanner banner = Repo.Instance.TvDB_ImageWideBanner.GetByID(imageID);
-                        if (banner == null) return "Could not find image";
-                        using (var upd = Repo.Instance.TvDB_ImageWideBanner.BeginAddOrUpdate(() => banner))
+                        using (var upd = Repo.Instance.TvDB_ImageWideBanner.BeginAddOrUpdate(imageID))
                         {
+                            if (upd.IsNew())
+                                return "Could not find image";
                             upd.Entity.Enabled = enabled ? 1 : 0;
                             upd.Commit();
                         }
                         break;
 
                     case ImageEntityType.TvDB_Cover:
-                        TvDB_ImagePoster poster = Repo.Instance.TvDB_ImagePoster.GetByID(imageID);
-                        if (poster == null) return "Could not find image";
-                        using (var upd = Repo.Instance.TvDB_ImagePoster.BeginAddOrUpdate(() => poster))
+                        using (var upd = Repo.Instance.TvDB_ImagePoster.BeginAddOrUpdate(imageID))
                         {
+                            if (upd.IsNew())
+                                return "Could not find image";
                             upd.Entity.Enabled = enabled ? 1 : 0;
                             upd.Commit();
                         }
                         break;
 
                     case ImageEntityType.TvDB_FanArt:
-                        TvDB_ImageFanart fanart = Repo.Instance.TvDB_ImageFanart.GetByID(imageID);
-                        if (fanart == null) return "Could not find image";
-                        using (var upd = Repo.Instance.TvDB_ImageFanart.BeginAddOrUpdate(() => fanart))
+                        using (var upd = Repo.Instance.TvDB_ImageFanart.BeginAddOrUpdate(imageID))
                         {
+                            if (upd.IsNew())
+                                return "Could not find image";
                             upd.Entity.Enabled = enabled ? 1 : 0;
                             upd.Commit();
                         }
                         break;
 
                     case ImageEntityType.MovieDB_Poster:
-                        MovieDB_Poster moviePoster = Repo.Instance.MovieDB_Poster.GetByID(imageID);
-                        if (moviePoster == null) return "Could not find image";
-                        using (var upd = Repo.Instance.MovieDB_Poster.BeginAddOrUpdate(() => moviePoster))
+                        using (var upd = Repo.Instance.MovieDB_Poster.BeginAddOrUpdate(imageID))
                         {
+                            if (upd.IsNew())
+                                return "Could not find image";
                             upd.Entity.Enabled = enabled ? 1 : 0;
                             upd.Commit();
                         }
                         break;
 
                     case ImageEntityType.MovieDB_FanArt:
-                        MovieDB_Fanart movieFanart = Repo.Instance.MovieDB_Fanart.GetByID(imageID);
-                        if (movieFanart == null) return "Could not find image";
-                        using (var upd = Repo.Instance.MovieDB_Fanart.BeginAddOrUpdate(() => movieFanart))
+                        using (var upd = Repo.Instance.MovieDB_Fanart.BeginAddOrUpdate(imageID))
                         {
+                            if (upd.IsNew())
+                                return "Could not find image";
                             upd.Entity.Enabled = enabled ? 1 : 0;
                             upd.Commit();
                         }
@@ -960,11 +968,7 @@ namespace Shoko.Server
                 {
                     // this mean we are removing an image as deafult
                     // which esssential means deleting the record
-
-                    AniDB_Anime_DefaultImage img =
-                        Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeIDAndImagezSizeType(animeID, (int) sizeType);
-                    if (img != null)
-                        Repo.Instance.AniDB_Anime_DefaultImage.Delete(img.AniDB_Anime_DefaultImageID);
+                    Repo.Instance.AniDB_Anime_DefaultImage.FindAndDelete(() => Repo.Instance.AniDB_Anime_DefaultImage.GetByAnimeIDAndImagezSizeType(animeID, (int) sizeType));
                 }
                 else
                 {
@@ -978,9 +982,7 @@ namespace Shoko.Server
                         txn.Commit();
                     }
                 }
-
-                SVR_AnimeSeries series = Repo.Instance.AnimeSeries.GetByAnimeID(animeID);
-                Repo.Instance.AnimeSeries.Touch(() => series, (false, false, false, false));
+                Repo.Instance.AnimeSeries.Touch(animeID, (false, false, false, false));
 
                 return string.Empty;
             }

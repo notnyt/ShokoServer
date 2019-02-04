@@ -3,8 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Security.Policy;
+
 using System.Text;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json;
@@ -15,14 +14,17 @@ using Shoko.Models.Client;
 using Shoko.Models.Interfaces;
 using Shoko.Models.PlexAndKodi;
 using Shoko.Models.Server;
-using Shoko.Server.Commands;
+using Shoko.Models.Server.Media;
+using Shoko.Server.CommandQueue.Commands.AniDB;
+using Shoko.Server.CommandQueue.Commands.Trakt;
+using Shoko.Server.Compression.LZ4;
 using Shoko.Server.Extensions;
-using Shoko.Server.LZ4;
 using Shoko.Server.PlexAndKodi;
 using Shoko.Server.Repositories;
-using Shoko.Server.Repositories.Cached;
+
 using Shoko.Server.Repositories.Repos;
 using Shoko.Server.Security;
+using Shoko.Server.Settings;
 using Stream = Shoko.Models.PlexAndKodi.Stream;
 
 namespace Shoko.Server.Models
@@ -36,6 +38,7 @@ namespace Shoko.Server.Models
         public int MediaVersion { get; set; }
         public byte[] MediaBlob { get; set; }
         public int MediaSize { get; set; }
+        public string SubtitleStreams { get; set; }
 
         #endregion
 
@@ -43,7 +46,16 @@ namespace Shoko.Server.Models
         public int MyListID { get; set; }
 
         [JsonIgnore]
-        public string Info => string.IsNullOrEmpty(FileName) ? string.Empty : FileName;
+        public string Info
+        {
+            get
+            {
+                string path = GetBestVideoLocalPlace(true).FilePath;
+                if (string.IsNullOrEmpty(path))
+                    return string.Empty;
+                return System.IO.Path.GetFileName(path);
+            }
+        }
 
 
         public const int MEDIA_VERSION = 3;
@@ -56,19 +68,37 @@ namespace Shoko.Server.Models
         {
             get
             {
-                if ((_media == null) && (MediaBlob != null) && (MediaBlob.Length > 0) && (MediaSize > 0))
-                    _media = CompressionHelper.DeserializeObject<Media>(MediaBlob, MediaSize);
+                if (_media == null && MediaInfo != null && MediaInfo.MediaInfo!=null)
+                {
+                    _media = Native.MediaInfo.MediaConvert.ConvertToPlexMedia(MediaInfo.MediaInfo, this);
+                }
                 return _media;
+            }
+
+        }
+        internal MediaStoreInfo _mediaInfo;
+
+        [NotMapped]
+        public virtual MediaStoreInfo MediaInfo
+        {
+            get
+            {
+                if ((_mediaInfo == null) && (MediaBlob != null) && (MediaBlob.Length > 0) && (MediaSize > 0))
+                {
+                    _mediaInfo=new MediaStoreInfo();
+                    _mediaInfo.MediaInfo = CompressionHelper.DeserializeString(MediaBlob, MediaSize);
+                    _mediaInfo.Version = MediaVersion;
+                }
+                return _mediaInfo;
             }
             set
             {
-                _media = value;
-                MediaBlob = CompressionHelper.SerializeObject(value, out int outsize);
+                _mediaInfo = value;
+                MediaBlob = CompressionHelper.SerializeString(value.MediaInfo, out int outsize);
                 MediaSize = outsize;
-                MediaVersion = MEDIA_VERSION;
+                MediaVersion = value.Version;
             }
         }
-
         [NotMapped]
         public List<SVR_VideoLocal_Place> Places => Repo.Instance.VideoLocal_Place.GetByVideoLocal(VideoLocalID);
 
@@ -85,7 +115,7 @@ namespace Shoko.Server.Models
             sb.Append("VideoLocalID: " + VideoLocalID);
 
             sb.Append(Environment.NewLine);
-            sb.Append("FileName: " + FileName);
+            sb.Append("FileName: " + Info);
             sb.Append(Environment.NewLine);
             sb.Append("Hash: " + Hash);
             sb.Append(Environment.NewLine);
@@ -147,7 +177,7 @@ namespace Shoko.Server.Models
             VideoLocal_User vidUserRecord = GetUserRecord(userID);
             if (watched)
             {
-                using (var upd = Repo.Instance.VideoLocal_User.BeginAddOrUpdate(() => vidUserRecord))
+                using (var upd = Repo.Instance.VideoLocal_User.BeginAddOrUpdate(vidUserRecord))
                 {
                     upd.Entity.WatchedDate = DateTime.Now;
                     upd.Entity.JMMUserID = userID;
@@ -159,7 +189,7 @@ namespace Shoko.Server.Models
                 }
             }
             else if (vidUserRecord != null)
-                using (var upd = Repo.Instance.VideoLocal_User.BeginAddOrUpdate(() => vidUserRecord))
+                using (var upd = Repo.Instance.VideoLocal_User.BeginAddOrUpdate(vidUserRecord))
                 {
                     upd.Entity.WatchedDate = null;
                     upd.Commit();
@@ -251,7 +281,7 @@ namespace Shoko.Server.Models
                 SVR_AniDB_File aniFile = Repo.Instance.AniDB_File.GetByHash(Hash);
                 if (aniFile != null)
                 {
-                    using (var upd = Repo.Instance.AniDB_File.BeginAddOrUpdate(() => aniFile))
+                    using (var upd = Repo.Instance.AniDB_File.BeginAddOrUpdate(aniFile))
                     {
                         upd.Entity.IsWatched = mywatched;
 
@@ -268,10 +298,8 @@ namespace Shoko.Server.Models
                     if ((watched && ServerSettings.Instance.AniDb.MyList_SetWatched) ||
                         (!watched && ServerSettings.Instance.AniDb.MyList_SetUnwatched))
                     {
-                        CommandRequest_UpdateMyListFileStatus cmd = new CommandRequest_UpdateMyListFileStatus(
-                            Hash, watched, false,
-                            AniDB.GetAniDBDateAsSeconds(watchedDate?.ToUniversalTime()));
-                        cmd.Save();
+                        CommandQueue.Queue.Instance.Add(new CmdAniDBUpdateMyListFileStatus(Hash, watched, false,AniDB.GetAniDBDateAsSeconds(watchedDate?.ToUniversalTime())));
+
                     }
             }
 
@@ -325,9 +353,7 @@ namespace Shoko.Server.Models
                         if (syncTrakt && ServerSettings.Instance.TraktTv.Enabled &&
                             !string.IsNullOrEmpty(ServerSettings.Instance.TraktTv.AuthToken))
                         {
-                            CommandRequest_TraktHistoryEpisode cmdSyncTrakt =
-                                new CommandRequest_TraktHistoryEpisode(ep.AnimeEpisodeID, TraktSyncAction.Add);
-                            cmdSyncTrakt.Save();
+                            CommandQueue.Queue.Instance.Add(new CmdTraktHistoryEpisode(ep.AnimeEpisodeID, TraktSyncAction.Add));
                         }
                     }
                 }
@@ -371,9 +397,7 @@ namespace Shoko.Server.Models
                         if (syncTrakt && ServerSettings.Instance.TraktTv.Enabled &&
                             !string.IsNullOrEmpty(ServerSettings.Instance.TraktTv.AuthToken))
                         {
-                            CommandRequest_TraktHistoryEpisode cmdSyncTrakt =
-                                new CommandRequest_TraktHistoryEpisode(ep.AnimeEpisodeID, TraktSyncAction.Remove);
-                            cmdSyncTrakt.Save();
+                            CommandQueue.Queue.Instance.Add(new CmdTraktHistoryEpisode(ep.AnimeEpisodeID, TraktSyncAction.Remove));
                         }
                     }
                 }
@@ -389,7 +413,7 @@ namespace Shoko.Server.Models
 
         public override string ToString()
         {
-            return $"{FileName} --- {Hash}";
+            return $"{Info} --- {Hash}";
         }
 
 
@@ -399,7 +423,7 @@ namespace Shoko.Server.Models
             {
                 CRC32 = CRC32,
                 DateTimeUpdated = DateTimeUpdated,
-                FileName = FileName,
+                FileName = Info,
                 FileSize = FileSize,
                 Hash = Hash,
                 HashSource = HashSource,
@@ -435,7 +459,7 @@ namespace Shoko.Server.Models
             if (!string.IsNullOrEmpty(MD5)) return false;
             if (!string.IsNullOrEmpty(CRC32)) return false;
             if (!string.IsNullOrEmpty(SHA1)) return false;
-            if (!string.IsNullOrEmpty(FileName)) return false;
+            if (!string.IsNullOrEmpty(Info)) return false;
             if (FileSize > 0) return false;
             return true;
         }
@@ -452,7 +476,7 @@ namespace Shoko.Server.Models
                 SVR_VideoLocal_Place pl = GetBestVideoLocalPlace();
                 if (pl?.FullServerPath != null)
                 {
-                    using (var upd = Repo.Instance.VideoLocal.BeginAddOrUpdate(() => pl.VideoLocal))
+                    using (var upd = Repo.Instance.VideoLocal.BeginAddOrUpdate(pl.VideoLocalID))
                     {
                         IFileSystem f = pl.ImportFolder.FileSystem;
                         IObject src = f?.Resolve(pl.FullServerPath);
@@ -468,7 +492,7 @@ namespace Shoko.Server.Models
             if (n.Parts == null) return n;
             foreach (Part p in n.Parts)
             {
-                string name = UrlSafe.Replace(Path.GetFileName(FileName), " ")
+                string name = UrlSafe.Replace(Path.GetFileName(Info), " ")
                     .Replace("  ", " ")
                     .Replace("  ", " ")
                     .Trim();
@@ -508,7 +532,7 @@ namespace Shoko.Server.Models
             cl.CrossRefSource = xrefs[0].CrossRefSource;
             cl.AnimeEpisodeID = xrefs[0].EpisodeID;
 
-            cl.VideoLocal_FileName = FileName;
+            cl.VideoLocal_FileName = Info;
             cl.VideoLocal_Hash = Hash;
             cl.VideoLocal_FileSize = FileSize;
             cl.VideoLocalID = VideoLocalID;
@@ -609,7 +633,7 @@ namespace Shoko.Server.Models
             {
                 CRC32 = CRC32,
                 DateTimeUpdated = DateTimeUpdated,
-                FileName = FileName,
+                FileName = Info,
                 FileSize = FileSize,
                 Hash = Hash,
                 HashSource = HashSource,

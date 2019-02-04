@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using AniDBAPI;
 using NLog;
 using Shoko.Commons.Extensions;
 using Shoko.Commons.Utils;
@@ -12,7 +11,6 @@ using Shoko.Models.Client;
 using Shoko.Models.Enums;
 using Shoko.Models.Metro;
 using Shoko.Models.Server;
-using Shoko.Server.Databases;
 using Shoko.Server.Models;
 using Shoko.Server.ImageDownload;
 using Shoko.Server.Providers.TraktTV;
@@ -22,6 +20,10 @@ using Shoko.Server.Extensions;
 using Shoko.Server.Repositories;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Shoko.Models.Server.CrossRef;
+using Shoko.Server.Providers.TvDB;
+using Shoko.Server.Settings;
+using Shoko.Server.Utilities;
 
 namespace Shoko.Server
 {
@@ -39,23 +41,32 @@ namespace Shoko.Server
 
             try
             {
-                contract.HashQueueCount = ShokoService.CmdProcessorHasher.QueueCount;
-                contract.HashQueueState =
-                    ShokoService.CmdProcessorHasher.QueueState.formatMessage(); //Deprecated since 3.6.0.0
-                contract.HashQueueStateId = (int) ShokoService.CmdProcessorHasher.QueueState.queueState;
-                contract.HashQueueStateParams = ShokoService.CmdProcessorHasher.QueueState.extraParams;
+                contract.HashQueueCount = ServerInfo.Instance.HasherQueueCount;
+                if (ServerInfo.Instance.HasherQueueState != null)
+                {
+                    contract.HashQueueState = ServerInfo.Instance.HasherQueueState.PrettyDescription.FormatMessage(); //Deprecated since 3.6.0.0
+                    contract.HashQueueStateId = (int)ServerInfo.Instance.HasherQueueState.PrettyDescription.QueueState;
+                    contract.HashQueueStateParams = ServerInfo.Instance.HasherQueueState.PrettyDescription.ExtraParams;
+                    contract.HashQueueStatePercentage = ServerInfo.Instance.HasherQueueState.Progress;
+                }
 
-                contract.GeneralQueueCount = ShokoService.CmdProcessorGeneral.QueueCount;
-                contract.GeneralQueueState =
-                    ShokoService.CmdProcessorGeneral.QueueState.formatMessage(); //Deprecated since 3.6.0.0
-                contract.GeneralQueueStateId = (int) ShokoService.CmdProcessorGeneral.QueueState.queueState;
-                contract.GeneralQueueStateParams = ShokoService.CmdProcessorGeneral.QueueState.extraParams;
+                contract.GeneralQueueCount = ServerInfo.Instance.GeneralQueueCount;
+                if (ServerInfo.Instance.GeneralQueueState != null)
+                {
+                    contract.GeneralQueueState = ServerInfo.Instance.GeneralQueueState.PrettyDescription.FormatMessage(); //Deprecated since 3.6.0.0
+                    contract.GeneralQueueStateId = (int)ServerInfo.Instance.GeneralQueueState.PrettyDescription.QueueState;
+                    contract.GeneralQueueStateParams = ServerInfo.Instance.GeneralQueueState.PrettyDescription.ExtraParams;
+                    contract.GeneralQueueStatePercentage = ServerInfo.Instance.GeneralQueueState.Progress;
+                }
 
-                contract.ImagesQueueCount = ShokoService.CmdProcessorImages.QueueCount;
-                contract.ImagesQueueState =
-                    ShokoService.CmdProcessorImages.QueueState.formatMessage(); //Deprecated since 3.6.0.0
-                contract.ImagesQueueStateId = (int) ShokoService.CmdProcessorImages.QueueState.queueState;
-                contract.ImagesQueueStateParams = ShokoService.CmdProcessorImages.QueueState.extraParams;
+                contract.ImagesQueueCount = ServerInfo.Instance.ImagesQueueCount;
+                if (ServerInfo.Instance.ImagesQueueState != null)
+                {
+                    contract.ImagesQueueState = ServerInfo.Instance.ImagesQueueState.PrettyDescription.FormatMessage(); //Deprecated since 3.6.0.0
+                    contract.ImagesQueueStateId = (int)ServerInfo.Instance.ImagesQueueState.PrettyDescription.QueueState;
+                    contract.ImagesQueueStateParams = ServerInfo.Instance.ImagesQueueState.PrettyDescription.ExtraParams;
+                    contract.ImagesQueueStatePercentage = ServerInfo.Instance.ImagesQueueState.Progress;
+                }
 
                 contract.IsBanned = ShokoService.AnidbProcessor.IsHttpBanned || ShokoService.AnidbProcessor.IsUdpBanned;
                 contract.BanReason = (ShokoService.AnidbProcessor.IsHttpBanned ? ShokoService.AnidbProcessor.HttpBanTime : ShokoService.AnidbProcessor.UdpBanTime).ToString();
@@ -104,29 +115,29 @@ namespace Shoko.Server
                 contract.AniDB_DiscussURL = string.Format(Constants.URLS.AniDB_SeriesDiscussion, animeID);
 
                 // MAL
-                List<CrossRef_AniDB_MAL> malRef = anime.GetCrossRefMAL();
+                List<SVR_CrossRef_AniDB_Provider> malRef = anime.GetCrossRefMAL();
                 if (malRef != null && malRef.Count > 0)
                 {
-                    contract.MAL_ID = malRef[0].MALID.ToString();
-                    contract.MAL_URL = string.Format(Constants.URLS.MAL_Series, malRef[0].MALID);
+                    contract.MAL_ID = malRef[0].CrossRefID;
+                    contract.MAL_URL = string.Format(Constants.URLS.MAL_Series, malRef[0].CrossRefID);
                     //contract.MAL_DiscussURL = string.Format(Constants.URLS.MAL_SeriesDiscussion, malRef[0].MALID, malRef[0].MALTitle);
-                    contract.MAL_DiscussURL = string.Format(Constants.URLS.MAL_Series, malRef[0].MALID);
+                    contract.MAL_DiscussURL = string.Format(Constants.URLS.MAL_Series, malRef[0].CrossRefID);
                 }
 
                 // TvDB
-                List<CrossRef_AniDB_TvDB> tvdbRef = anime.GetCrossRefTvDB();
+                List<SVR_CrossRef_AniDB_Provider> tvdbRef = anime.GetCrossRefTvDB();
                 if (tvdbRef != null && tvdbRef.Count > 0)
                 {
-                    contract.TvDB_ID = tvdbRef[0].TvDBID.ToString();
-                    contract.TvDB_URL = string.Format(Constants.URLS.TvDB_Series, tvdbRef[0].TvDBID);
+                    contract.TvDB_ID = tvdbRef[0].CrossRefID;
+                    contract.TvDB_URL = string.Format(Constants.URLS.TvDB_Series, tvdbRef[0].CrossRefID);
                 }
 
                 // Trakt
-                List<CrossRef_AniDB_TraktV2> traktRef = anime.GetCrossRefTraktV2();
+                List<SVR_CrossRef_AniDB_Provider> traktRef = anime.GetCrossRefTraktV2();
                 if (traktRef != null && traktRef.Count > 0)
                 {
-                    contract.Trakt_ID = traktRef[0].TraktID;
-                    contract.Trakt_URL = string.Format(Constants.URLS.Trakt_Series, traktRef[0].TraktID);
+                    contract.Trakt_ID = traktRef[0].CrossRefID;
+                    contract.Trakt_URL = string.Format(Constants.URLS.Trakt_Series, traktRef[0].CrossRefID);
                 }
             }
             catch (Exception ex)
@@ -834,10 +845,13 @@ namespace Shoko.Server
         [NonAction]
         public static void SetTvDBInfo(TvDBSummary tvSummary, AniDB_Episode ep, ref Metro_Anime_Episode contract)
         {
-            var override_link = Repo.Instance.CrossRef_AniDB_TvDB_Episode_Override.GetByAniDBEpisodeID(ep.EpisodeID);
-            if (override_link.Any(a => a != null))
+            List<SVR_CrossRef_AniDB_Provider> provs=Repo.Instance.CrossRef_AniDB_Provider.GetByAnimeIDAndType(ep.AnimeID, CrossRefType.TvDB);
+
+
+            var override_link = provs.SelectMany(a=>a.EpisodesOverride).FirstOrDefault(a => a.AniDBEpisodeID==ep.EpisodeID);
+            if (override_link!=null)
             {
-                var tvep = Repo.Instance.TvDB_Episode.GetByTvDBID(override_link.FirstOrDefault().TvDBEpisodeID);
+                var tvep = Repo.Instance.TvDB_Episode.GetByTvDBID(int.Parse(override_link.ProviderEpisodeID));
                 contract.EpisodeName = tvep.EpisodeName;
                 contract.EpisodeOverview = tvep.Overview;
                 contract.ImageID = tvep.Id;
@@ -845,10 +859,10 @@ namespace Shoko.Server
                 return;
             }
 
-            var link = Repo.Instance.CrossRef_AniDB_TvDB_Episode.GetByAniDBEpisodeID(ep.EpisodeID);
-            if (link.Any(a => a != null))
+            var link = provs.SelectMany(a => a.Episodes).FirstOrDefault(a => a.AniDBEpisodeID == ep.EpisodeID);
+            if (link!=null)
             {
-                var tvep = Repo.Instance.TvDB_Episode.GetByTvDBID(link.FirstOrDefault().TvDBEpisodeID);
+                var tvep = Repo.Instance.TvDB_Episode.GetByTvDBID(int.Parse(link.ProviderEpisodeID));
                 contract.EpisodeName = tvep.EpisodeName;
                 contract.EpisodeOverview = tvep.Overview;
                 contract.ImageID = tvep.Id;

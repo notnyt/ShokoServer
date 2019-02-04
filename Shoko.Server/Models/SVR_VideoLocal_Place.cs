@@ -5,24 +5,28 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using NLog;
 using NutzCode.CloudFileSystem;
 using NutzCode.CloudFileSystem.Plugins.LocalFileSystem;
 using Shoko.Commons.Extensions;
-using Shoko.Models.Azure;
 using Shoko.Models.PlexAndKodi;
 using Shoko.Models.Server;
-using Shoko.Server.Commands;
-using Shoko.Server.Databases;
+using Shoko.Models.Server.Media;
+using Shoko.Models.WebCache;
+using Shoko.Server.CommandQueue.Commands.AniDB;
 using Shoko.Server.Extensions;
-using Shoko.Server.FileHelper.MediaInfo;
-using Shoko.Server.FileHelper.Subtitles;
+using Shoko.Server.Native.MediaInfo;
+using Shoko.Server.Native.MediaInfo.Subtitles;
 using Shoko.Server.PlexAndKodi;
-using Shoko.Server.Providers.Azure;
+using Shoko.Server.Providers.WebCache;
+using Shoko.Server.Renamer;
 using Shoko.Server.Repositories;
-using Shoko.Server.Repositories.Cached;
 using Shoko.Server.Repositories.Repos;
+using Shoko.Server.Settings;
+using Status = NutzCode.CloudFileSystem.Status;
 using Stream = Shoko.Models.PlexAndKodi.Stream;
+using Utils = Shoko.Server.Utilities.Utils;
 
 namespace Shoko.Server.Models
 {
@@ -178,17 +182,12 @@ namespace Shoko.Server.Models
                     Repo.Instance.FileNameHash.BeginAdd(fnhash).Commit();
                 }
 
-                using (var upd = Repo.Instance.VideoLocal_Place.BeginAddOrUpdate(() => this))
+                using (var upd = Repo.Instance.VideoLocal_Place.BeginAddOrUpdate(this))
                 {
                     FilePath = upd.Entity.FilePath = tup.Item2; //Also update this, as we can't 
                     upd.Commit();
                 }
-                // just in case
-                using (var upd = Repo.Instance.VideoLocal.BeginAddOrUpdate(() => VideoLocal))
-                {
-                    FilePath = upd.Entity.FileName = renamed; 
-                    upd.Commit();
-                }
+
             }
             catch (Exception ex)
             {
@@ -213,9 +212,7 @@ namespace Shoko.Server.Models
             {
                 if (updateMyListStatus)
                 {
-                    CommandRequest_DeleteFileFromMyList cmdDel =
-                        new CommandRequest_DeleteFileFromMyList(v.MyListID);
-                    cmdDel.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdAniDBDeleteFileFromMyList(v.MyListID));
                 }
 
                 using (var transaction = Repo.Instance.Provider.GetContext().Database.BeginTransaction())
@@ -226,8 +223,8 @@ namespace Shoko.Server.Models
                     seriesToUpdate.AddRange(v.GetAnimeEpisodes().DistinctBy(a => a.AnimeSeriesID)
                         .Select(a => a.GetAnimeSeries()));
                     Repo.Instance.VideoLocal.Delete(v);
-
-                    dupFiles?.ForEach(a => Repo.Instance.DuplicateFile.Delete(a));
+                    if (dupFiles != null)
+                        Repo.Instance.DuplicateFile.Delete(dupFiles);
                     transaction.Commit();
                 }
             }
@@ -236,21 +233,19 @@ namespace Shoko.Server.Models
                 using (var transaction = Repo.Instance.Provider.GetContext().Database.BeginTransaction())
                 {
                     Repo.Instance.VideoLocal_Place.Delete(this);
-                    dupFiles?.ForEach(a => Repo.Instance.DuplicateFile.Delete( a));
+                    if (dupFiles != null)
+                        Repo.Instance.DuplicateFile.Delete(dupFiles);
                     transaction.Commit();
                 }
             }
             episodesToUpdate = episodesToUpdate.DistinctBy(a => a.AnimeEpisodeID).ToList();
-            foreach (SVR_AnimeEpisode ep in episodesToUpdate)
+            try
             {
-                try
-                {
-                    Repo.Instance.AnimeEpisode.Touch(() => ep);
-                }
-                catch (Exception ex)
-                {
-                    LogManager.GetCurrentClassLogger().Error(ex, ex.ToString());
-                }
+                Repo.Instance.AnimeEpisode.Touch(episodesToUpdate);
+            }
+            catch (Exception ex)
+            {
+                LogManager.GetCurrentClassLogger().Error(ex, ex.ToString());
             }
             foreach (SVR_AnimeSeries ser in seriesToUpdate)
             {
@@ -273,9 +268,7 @@ namespace Shoko.Server.Models
             {
                 if (updateMyListStatus)
                 {
-                    CommandRequest_DeleteFileFromMyList cmdDel =
-                        new CommandRequest_DeleteFileFromMyList(v.MyListID);
-                    cmdDel.Save();
+                    CommandQueue.Queue.Instance.Add(new CmdAniDBDeleteFileFromMyList(v.MyListID));
                 }
 
                 List<SVR_AnimeEpisode> eps = v?.GetAnimeEpisodes()?.Where(a => a != null).ToList();
@@ -284,9 +277,9 @@ namespace Shoko.Server.Models
                 using (var transaction = Repo.Instance.Provider.GetContext().Database.BeginTransaction())
                 {
                     Repo.Instance.VideoLocal_Place.Delete(this);
-                    Repo.Instance.VideoLocal.Delete(v);
-                    dupFiles?.ForEach(a => Repo.Instance.DuplicateFile.Delete(a));
-
+                    Repo.Instance.VideoLocal.Delete(v.VideoLocalID);
+                    if (dupFiles != null)
+                        Repo.Instance.DuplicateFile.Delete(dupFiles);
                     transaction.Commit();
                 }
             }
@@ -295,7 +288,8 @@ namespace Shoko.Server.Models
                 using (var transaction = Repo.Instance.Provider.GetContext().Database.BeginTransaction())
                 {
                     Repo.Instance.VideoLocal_Place.Delete(this);
-                    dupFiles?.ForEach(a => Repo.Instance.DuplicateFile.Delete(a));
+                    if (dupFiles != null)
+                        Repo.Instance.DuplicateFile.Delete(dupFiles);
                     transaction.Commit();
                 }
             }
@@ -310,8 +304,11 @@ namespace Shoko.Server.Models
             return fobj as IFile;
         }
 
-        public static void FillVideoInfoFromMedia(SVR_VideoLocal info, Media m)
+        public static void FillVideoInfoFromMedia(SVR_VideoLocal info)
         {
+            Media m = info.Media;
+            if (m == null)
+                return;
             info.VideoResolution = m.Width != 0 && m.Height != 0 ? m.Width + "x" + m.Height : string.Empty;
             info.VideoCodec = !string.IsNullOrEmpty(m.VideoCodec)
                 ? m.VideoCodec
@@ -321,7 +318,7 @@ namespace Shoko.Server.Models
                 : m.Parts.SelectMany(a => a.Streams).FirstOrDefault(a => a.StreamType == 2)?.CodecID ?? string.Empty;
 
 
-            info.Duration = m.Duration;
+            info.Duration = (long)Math.Round(m.Duration);
 
             info.VideoBitrate = info.VideoBitDepth = info.VideoFrameRate = info.AudioBitrate = string.Empty;
             List<Stream> vparts = m.Parts.SelectMany(a => a.Streams).Where(a => a.StreamType == 1).ToList();
@@ -340,17 +337,13 @@ namespace Shoko.Server.Models
             try
             {
                 logger.Trace("Getting media info for: {0}", FullServerPath ?? VideoLocal_Place_ID.ToString());
-                Media m = null;
+                MediaStoreInfo m = null;
                 if (vl == null)
                 {
                     logger.Error($"VideoLocal for {FullServerPath ?? VideoLocal_Place_ID.ToString()} failed to be retrived for MediaInfo");
                     return false;
                 }
-                List<Azure_Media> webmedias = AzureWebAPI.Get_Media(vl.ED2KHash);
-                if (webmedias != null && webmedias.Count > 0 && webmedias.FirstOrDefault(a => a != null) != null)
-                {
-                    m = webmedias.FirstOrDefault(a => a != null).ToMedia();
-                }
+                m = WebCacheAPI.Instance.GetMediaInfo(vl.ED2KHash);
                 if (m == null && FullServerPath != null)
                 {
                     if (GetFile() == null)
@@ -362,48 +355,21 @@ namespace Shoko.Server.Models
                         ? FullServerPath.Replace("/", $"{Path.DirectorySeparatorChar}")
                         : ((IProvider)null).ReplaceSchemeHost(((IProvider)null).ConstructVideoLocalStream(0,
                             VideoLocalID, "file", false));
-                    m = MediaConvert.Convert(name, GetFile()); //Mediainfo should have libcurl.dll for http
-                    if ((m?.Duration ?? 0) == 0)
+                    m = MediaConvert.GetMediaInfo(name, GetFile()); //Mediainfo should have libcurl.dll for http
+                    if (m==null || m.MediaInfo==null)
                         m = null;
                     if (m != null)
-                        AzureWebAPI.Send_Media(VideoLocal.ED2KHash, m);
+                        WebCacheAPI.Instance.AddMediaInfo(m.ToMediaRequest(VideoLocal.ED2KHash));
                 }
 
 
                 if (m != null)
                 {
-                    FillVideoInfoFromMedia(vl, m);
-
-                    m.Id = VideoLocalID;
+                    vl.MediaInfo = m;
                     List<Stream> subs = SubtitleHelper.GetSubtitleStreams(this);
                     if (subs.Count > 0)
-                    {
-                        m.Parts[0].Streams.AddRange(subs);
-                    }
-                    foreach (Part p in m.Parts)
-                    {
-                        p.Id = 0;
-                        p.Accessible = 1;
-                        p.Exists = 1;
-                        bool vid = false;
-                        bool aud = false;
-                        bool txt = false;
-                        foreach (Stream ss in p.Streams.ToArray())
-                        {
-                            if (ss.StreamType == 1 && !vid) vid = true;
-                            if (ss.StreamType == 2 && !aud)
-                            {
-                                aud = true;
-                                ss.Selected = 1;
-                            }
-                            if (ss.StreamType == 3 && !txt)
-                            {
-                                txt = true;
-                                ss.Selected = 1;
-                            }
-                        }
-                    }
-                    vl.Media = m;
+                        vl.SubtitleStreams = JsonConvert.SerializeObject(subs, Formatting.None);
+                    FillVideoInfoFromMedia(vl);
                     return true;
                 }
                 logger.Error($"File {FullServerPath ?? VideoLocal_Place_ID.ToString()} failed to read MediaInfo");
@@ -764,7 +730,7 @@ namespace Shoko.Server.Models
                 dups.Commit();
             }
 
-            using (var upd = Repo.Instance.VideoLocal_Place.BeginAddOrUpdate(() => this))
+            using (var upd = Repo.Instance.VideoLocal_Place.BeginAddOrUpdate(this))
             {
                 upd.Entity.ImportFolderID = ImportFolderID = destFolder.ImportFolderID;
                 upd.Entity.FilePath = FilePath = newFilePath;
@@ -1047,7 +1013,7 @@ namespace Shoko.Server.Models
                                 upd.Commit();
                             }
 
-                            using (var upd = Repo.Instance.VideoLocal_Place.BeginAddOrUpdate(() => this))
+                            using (var upd = Repo.Instance.VideoLocal_Place.BeginAddOrUpdate(this))
                             {
                                 upd.Entity.ImportFolderID = ImportFolderID = destFolder.ImportFolderID;
                                 upd.Entity.FilePath = FilePath = newFilePath;
@@ -1139,7 +1105,7 @@ namespace Shoko.Server.Models
                         dups.Commit();
                     }
 
-                    using (var upd = Repo.Instance.VideoLocal_Place.BeginAddOrUpdate(() => this))
+                    using (var upd = Repo.Instance.VideoLocal_Place.BeginAddOrUpdate(this))
                     {
                         upd.Entity.ImportFolderID = ImportFolderID = destFolder.ImportFolderID;
                         upd.Entity.FilePath = FilePath = newFilePath;

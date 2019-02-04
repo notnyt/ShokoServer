@@ -10,8 +10,10 @@ using NLog;
 using NutzCode.CloudFileSystem;
 using Shoko.Commons.Notification;
 using Shoko.Server;
+using Shoko.Server.FileScanner;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories;
+using Shoko.Server.Utilities;
 using Application = System.Windows.Application;
 
 namespace Shoko.UI.Forms
@@ -22,8 +24,6 @@ namespace Shoko.UI.Forms
     public partial class CloudAccountForm : Window, INotifyPropertyChangedExt
     {
         private static Logger logger = LogManager.GetCurrentClassLogger();
-
-        public static Scanner Instance { get; set; } = new Scanner();
 
         public event PropertyChangedEventHandler PropertyChanged;
 
@@ -63,7 +63,7 @@ namespace Shoko.UI.Forms
                         SaveAccount.FileSystem = null;
                         SaveAccount = WorkingAccount;
                     }
-                    using (var upd = Repo.Instance.CloudAccount.BeginAddOrUpdate(() => SaveAccount))
+                    using (var upd = Repo.Instance.CloudAccount.BeginAddOrUpdate(SaveAccount.CloudID))
                     {
                         upd.Entity.FileSystem = WorkingAccount.FileSystem;
                         SaveAccount = upd.Commit();

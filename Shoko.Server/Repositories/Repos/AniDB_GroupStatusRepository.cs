@@ -1,10 +1,10 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
 using NLog;
-using NutzCode.InMemoryIndex;
 using Shoko.Models.Server;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories.Repos
 {
@@ -68,7 +68,7 @@ namespace Shoko.Server.Repositories.Repos
         }
         public void DeleteForAnime(int animeid)
         {
-            Delete(GetByAnimeID(animeid));
+            FindAndDelete(() => GetByAnimeID(animeid));
         }
     }
 }

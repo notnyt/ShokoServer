@@ -1,8 +1,8 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
-using NutzCode.InMemoryIndex;
 using Shoko.Models.Server;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories.Repos
 {
@@ -12,7 +12,7 @@ namespace Shoko.Server.Repositories.Repos
         private PocoIndex<int, AniDB_Anime_Review, int, int> AnimeReviews;
 
         internal override int SelectKey(AniDB_Anime_Review entity) => entity.AniDB_Anime_ReviewID;
-            
+
         internal override void PopulateIndexes()
         {
             Animes = new PocoIndex<int, AniDB_Anime_Review, int>(Cache, a => a.AnimeID);
@@ -49,7 +49,7 @@ namespace Shoko.Server.Repositories.Repos
             using (RepoLock.ReaderLock())
             {
                 if (IsCached)
-                    return Animes.GetMultiple(id).Select(a=>a.AniDB_Anime_ReviewID).ToList();
+                    return Animes.GetMultiple(id).Select(a => a.AniDB_Anime_ReviewID).ToList();
                 return Table.Where(a => a.AnimeID == id).Select(a => a.AniDB_Anime_ReviewID).ToList();
             }
         }

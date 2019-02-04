@@ -3,14 +3,13 @@ using System.Collections.Generic;
 using System.Linq;
 using Microsoft.EntityFrameworkCore;
 using NLog;
-using NutzCode.InMemoryIndex;
 using Shoko.Commons.Extensions;
 using Shoko.Models.Client;
 using Shoko.Models.Enums;
 using Shoko.Models.Server;
-using Shoko.Server.Databases;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories.Repos
 {
@@ -61,11 +60,11 @@ namespace Shoko.Server.Repositories.Repos
             if (parameters.updateGroups && !isMigrating)
             {
                 logger.Trace("Updating group stats by series from AnimeSeriesRepository.Save: {0}", entity.AnimeSeriesID);
-                Repo.Instance.AnimeGroup.Touch(() => Repo.Instance.AnimeGroup.GetByID(entity.AnimeGroupID), (true, true, true));
+                Repo.Instance.AnimeGroup.Touch(entity.AnimeGroupID, (true, true, true));
                 if (oldGroup != 0)
                 {
                     logger.Trace("Updating group stats by group from AnimeSeriesRepository.Save: {0}",oldGroup);
-                    Repo.Instance.AnimeGroup.Touch(() => Repo.Instance.AnimeGroup.GetByID(oldGroup), (true, true, true));
+                    Repo.Instance.AnimeGroup.Touch(oldGroup, (true, true, true));
                 }
             }
             if (!parameters.skipgroupfilters && !isMigrating)
@@ -114,7 +113,7 @@ namespace Shoko.Server.Repositories.Repos
         internal override object BeginDelete(SVR_AnimeSeries entity,
             (bool updateGroups, bool onlyupdatestats, bool skipgroupfilters, bool alsoupdateepisodes) parameters)
         {
-            Repo.Instance.AnimeSeries_User.Delete(entity.AnimeSeriesID);
+            Repo.Instance.AnimeSeries_User.FindAndDelete(() => Repo.Instance.AnimeSeries_User.GetBySeriesID(entity.AnimeSeriesID));
             lock(Changes)
                 Changes.Remove(entity.AnimeSeriesID);
             return null;
@@ -127,7 +126,7 @@ namespace Shoko.Server.Repositories.Repos
             if (entity.AnimeGroupID != 0)
             {
                 logger.Trace("Updating group stats by group from AnimeSeriesRepository.Delete: {0}", entity.AnimeGroupID);
-                Repo.Instance.AnimeGroup.Touch(()=>Repo.Instance.AnimeGroup.GetByID(entity.AnimeGroupID),(true, true, true));
+                Repo.Instance.AnimeGroup.Touch(entity.AnimeGroupID,(true, true, true));
             }
         }
 

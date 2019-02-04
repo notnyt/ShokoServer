@@ -2,10 +2,10 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using NutzCode.InMemoryIndex;
 using Shoko.Models.Server;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories.Repos
 {
@@ -75,9 +75,7 @@ namespace Shoko.Server.Repositories.Repos
 
         internal override object BeginDelete(SVR_VideoLocal_Place entity, object parameters)
         {
-            var dups = Repo.Instance.DuplicateFile.GetByFilePathAndImportFolder(entity.FilePath, entity.ImportFolderID);
-            if (dups != null && dups.Count > 0)
-                Repo.Instance.DuplicateFile.Delete(dups);
+            Repo.Instance.DuplicateFile.FindAndDelete(() => Repo.Instance.DuplicateFile.GetByFilePathAndImportFolder(entity.FilePath, entity.ImportFolderID));
             return null;
         }
 

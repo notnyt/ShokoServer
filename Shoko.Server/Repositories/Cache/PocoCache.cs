@@ -28,7 +28,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace NutzCode.InMemoryIndex
+namespace Shoko.Server.Repositories.Cache
 {
     //NOTE PocoCache is not thread SAFE
 
@@ -147,6 +147,11 @@ namespace NutzCode.InMemoryIndex
             if (_cache == null || !_dict.ContainsInverseKey(key))
                 return new List<S>();
             return _dict.FindInverse(key).Select(a => _cache.Get(a)).ToList();
+        }
+
+        public List<U> GetIndexes()
+        {
+            return _dict.GetInverses();
         }
 
         void IPocoCacheObserver<T, S>.Update(T key, S obj)
@@ -326,7 +331,10 @@ namespace NutzCode.InMemoryIndex
         {
             return inverse.ContainsKey(key);
         }
-
+        public List<S> GetInverses()
+        {
+            return inverse.Keys.ToList();
+        }
         public HashSet<T> FindInverse(S k)
         {
             return inverse.ContainsKey(k) 

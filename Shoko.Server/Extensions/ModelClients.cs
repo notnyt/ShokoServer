@@ -5,7 +5,6 @@ using Shoko.Models.Client;
 using Shoko.Models.Enums;
 using Shoko.Models.Interfaces;
 using Shoko.Models.Server;
-using Shoko.Server.Databases;
 using Shoko.Server.Models;
 using Shoko.Server.Repositories;
 using CL_AniDB_Anime_DefaultImage = Shoko.Models.Client.CL_AniDB_Anime_DefaultImage;
@@ -49,7 +48,6 @@ namespace Shoko.Server.Extensions
                 TempVoteCount = anime.TempVoteCount,
                 AvgReviewRating = anime.AvgReviewRating,
                 ReviewCount = anime.ReviewCount,
-                DateTimeUpdated = anime.GetDateTimeUpdated(),
                 DateTimeDescUpdated = anime.DateTimeDescUpdated,
                 ImageEnabled = anime.ImageEnabled,
                 AwardList = anime.AwardList,
@@ -93,6 +91,21 @@ namespace Shoko.Server.Extensions
             };
         }
 
+        public static CL_CrossRef_AniDB_Provider ToClient(this SVR_CrossRef_AniDB_Provider c)
+        {
+            return new CL_CrossRef_AniDB_Provider
+            {
+                AnimeID = c.AnimeID,
+                CrossRef_AniDB_ProviderID = c.CrossRef_AniDB_ProviderID,
+                CrossRefID = c.CrossRefID,
+                CrossRefSource = c.CrossRefSource,
+                CrossRefType = c.CrossRefType,
+                Episodes = c.Episodes,
+                EpisodesData = c.EpisodesData,
+                EpisodesOverride = c.EpisodesOverride,
+                EpisodesOverrideData = c.EpisodesOverrideData
+            };
+        }
         public static CL_AniDB_GroupStatus ToClient(this AniDB_GroupStatus g)
         {
             return new CL_AniDB_GroupStatus
@@ -349,7 +362,6 @@ namespace Shoko.Server.Extensions
             var titles = Repo.Instance.AniDB_Episode_Title.GetByEpisodeID(ep.EpisodeID);
             return new CL_AniDB_Episode
             {
-                AniDB_EpisodeID = ep.AniDB_EpisodeID,
                 EpisodeID = ep.EpisodeID,
                 AnimeID = ep.AnimeID,
                 LengthSeconds = ep.LengthSeconds,

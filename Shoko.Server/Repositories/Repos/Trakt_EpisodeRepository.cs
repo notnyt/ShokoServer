@@ -1,8 +1,9 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
-using NutzCode.InMemoryIndex;
 using Shoko.Models.Server;
 using Shoko.Server.Repositories.ReaderWriterLockExtensions;
+using Shoko.Server.Repositories.Cache;
 
 namespace Shoko.Server.Repositories.Repos
 {
@@ -54,7 +55,33 @@ namespace Shoko.Server.Repositories.Repos
                 return Table.FirstOrDefault(a => a.Trakt_ShowID == showID && a.Season == seasonNumber && a.EpisodeNumber==epnumber);
             }
         }
-
+        public int GetNumberOfEpisodesForSeason(int showID, int seasonNumber)
+        {
+            using (RepoLock.ReaderLock())
+            {
+                if (IsCached)
+                    return ShowsSeasons.GetMultiple(showID, seasonNumber).Count();
+                return Table.Count(a => a.Trakt_ShowID == showID && a.Season == seasonNumber);
+            }
+        }
+        public int GetLastSeasonForSeries(int showID)
+        {
+            using (RepoLock.ReaderLock())
+            {
+                List<int> max;
+                if (IsCached)
+                    max = Shows.GetMultiple(showID).Select(xref => xref.Season).ToList();
+                else
+                    max = Table.Where(a => a.Trakt_ShowID==showID).Select(xref => xref.Season).ToList();
+                if (max.Count == 0) return -1;
+                return max.Max();
+            }
+        }
+        public Trakt_Episode GetByReference(string reference)
+        {
+            string[] sp = reference.Split('_');
+            return GetByShowIDSeasonAndEpisode(int.Parse(sp[0]), int.Parse(sp[1]), int.Parse(sp[2]));
+        }
         public List<int> GetSeasonNumbersForSeries(int showID)
         {
             using (RepoLock.ReaderLock())

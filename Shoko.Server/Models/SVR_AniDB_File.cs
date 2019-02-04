@@ -4,12 +4,12 @@ using System.ComponentModel.DataAnnotations.Schema;
 using System.Linq;
 using System.Text;
 using System.Xml.Serialization;
-using AniDBAPI;
 using NLog;
 using Shoko.Commons.Extensions;
 using Shoko.Models.Enums;
 using Shoko.Models.Server;
 using Shoko.Server.Extensions;
+using Shoko.Server.Providers.AniDB.Raws;
 using Shoko.Server.Repositories;
 
 namespace Shoko.Server.Models
@@ -381,12 +381,8 @@ namespace Shoko.Server.Models
         public void CreateCrossEpisodes(string localFileName)
         {
             if (episodesRAW == null) return;
-            List<CrossRef_File_Episode> fileEps = Repo.Instance.CrossRef_File_Episode.GetByHash(Hash);
-
-            foreach (CrossRef_File_Episode fileEp in fileEps)
-                Repo.Instance.CrossRef_File_Episode.FindAndDelete(() => Repo.Instance.CrossRef_File_Episode.GetByID(fileEp.CrossRef_File_EpisodeID));
-
-            fileEps = new List<CrossRef_File_Episode>();
+            Repo.Instance.CrossRef_File_Episode.FindAndDelete(()=>Repo.Instance.CrossRef_File_Episode.GetByHash(Hash));
+            List<CrossRef_File_Episode> fileEps = new List<CrossRef_File_Episode>();
 
             char apostrophe = '\'';
             char epiSplit = ',';
